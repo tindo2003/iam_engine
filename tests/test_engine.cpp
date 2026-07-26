@@ -1,5 +1,4 @@
-#include <cassert>
-#include <iostream>
+#include <gtest/gtest.h>
 
 #include "iam/engine.hpp"
 #include "iam/policy.hpp"
@@ -8,54 +7,59 @@ using namespace iam;
 
 namespace {
 
-Policy allowDenyPolicy() {
-    return Policy::fromJsonString(R"({
-        "Statement": [
-            {"Effect": "Allow", "Action": ["db:read", "db:write"], "Resource": ["urn:table:users"]},
-            {"Effect": "Deny", "Action": ["db:delete"], "Resource": ["*"]}
-        ]
-    })");
-}
+class PolicyEngineTest : public ::testing::Test {
+protected:
+    Policy allowDenyPolicy() {
+        return Policy::fromJsonString(R"({
+            "Statement": [
+                {"Effect": "Allow", "Action": ["db:read", "db:write"], "Resource": ["urn:table:users"]},
+                {"Effect": "Deny", "Action": ["db:delete"], "Resource": ["*"]}
+            ]
+        })");
+    }
+};
 
-void test_default_deny_with_no_policies() {
+} // namespace
+
+TEST_F(PolicyEngineTest, DefaultDenyWithNoPolicies) {
     const std::vector<Policy> policies;
     const Request request{"alice", "db:read", "urn:table:users"};
-    assert(PolicyEngine::evaluate(policies, request) == false);
+    EXPECT_FALSE(PolicyEngine::evaluate(policies, request));
 }
 
-void test_explicit_allow() {
+TEST_F(PolicyEngineTest, ExplicitAllow) {
     const std::vector<Policy> policies{allowDenyPolicy()};
     const Request request{"alice", "db:read", "urn:table:users"};
-    assert(PolicyEngine::evaluate(policies, request) == true);
+    EXPECT_TRUE(PolicyEngine::evaluate(policies, request));
 }
 
-void test_no_matching_statement_is_denied() {
+TEST_F(PolicyEngineTest, NoMatchingStatementIsDenied) {
     const std::vector<Policy> policies{allowDenyPolicy()};
     const Request request{"alice", "db:read", "urn:table:orders"};
-    assert(PolicyEngine::evaluate(policies, request) == false);
+    EXPECT_FALSE(PolicyEngine::evaluate(policies, request));
 }
 
-void test_explicit_deny_overrides_allow() {
+TEST_F(PolicyEngineTest, ExplicitDenyOverridesAllow) {
     // db:delete matches the wildcard Deny statement even though the
     // resource also matches an Allow-eligible table.
     const std::vector<Policy> policies{allowDenyPolicy()};
     const Request request{"alice", "db:delete", "urn:table:users"};
-    assert(PolicyEngine::evaluate(policies, request) == false);
+    EXPECT_FALSE(PolicyEngine::evaluate(policies, request));
 }
 
-void test_wildcard_action_match() {
+TEST_F(PolicyEngineTest, WildcardActionMatch) {
     const Policy policy = Policy::fromJsonString(R"({
         "Statement": [
             {"Effect": "Allow", "Action": ["db:*"], "Resource": ["*"]}
         ]
     })");
     const std::vector<Policy> policies{policy};
-    assert(PolicyEngine::evaluate(policies, Request{"alice", "db:read", "anything"}) == true);
-    assert(PolicyEngine::evaluate(policies, Request{"alice", "db:delete", "anything"}) == true);
-    assert(PolicyEngine::evaluate(policies, Request{"alice", "s3:read", "anything"}) == false);
+    EXPECT_TRUE(PolicyEngine::evaluate(policies, Request{"alice", "db:read", "anything"}));
+    EXPECT_TRUE(PolicyEngine::evaluate(policies, Request{"alice", "db:delete", "anything"}));
+    EXPECT_FALSE(PolicyEngine::evaluate(policies, Request{"alice", "s3:read", "anything"}));
 }
 
-void test_deny_from_a_different_policy_still_wins() {
+TEST_F(PolicyEngineTest, DenyFromADifferentPolicyStillWins) {
     // Simulates two separately-attached policies (e.g. a user policy and
     // a group policy) where one allows broadly and the other denies narrowly.
     const Policy allowAll = Policy::fromJsonString(R"({
@@ -66,20 +70,6 @@ void test_deny_from_a_different_policy_still_wins() {
     })");
     const std::vector<Policy> policies{allowAll, denyDelete};
 
-    assert(PolicyEngine::evaluate(policies, Request{"alice", "db:read", "x"}) == true);
-    assert(PolicyEngine::evaluate(policies, Request{"alice", "db:delete", "x"}) == false);
-}
-
-} // namespace
-
-int main() {
-    test_default_deny_with_no_policies();
-    test_explicit_allow();
-    test_no_matching_statement_is_denied();
-    test_explicit_deny_overrides_allow();
-    test_wildcard_action_match();
-    test_deny_from_a_different_policy_still_wins();
-
-    std::cout << "All tests passed.\n";
-    return 0;
+    EXPECT_TRUE(PolicyEngine::evaluate(policies, Request{"alice", "db:read", "x"}));
+    EXPECT_FALSE(PolicyEngine::evaluate(policies, Request{"alice", "db:delete", "x"}));
 }
