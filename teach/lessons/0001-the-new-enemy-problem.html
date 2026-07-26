@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lesson 1 — Why You Can't Just Cache an IAM Decision</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 0001 · iam-engine teaching workspace</p>
+<h1>Why You Can't Just Cache an IAM Decision</h1>
+<p class="sidenote">Ties to <a href="../MISSION.md">MISSION.md</a>'s primary
+goal: understanding IAM evaluation caching. This lesson is the concept you
+need before any invalidation strategy makes sense.</p>
+
+<p>
+Your <code>iam-engine</code> project already has a working evaluator —
+<code>PolicyEngine::evaluate()</code> in
+<a href="../../src/engine.cpp"><code>src/engine.cpp</code></a> — that walks
+every policy's statements on every single call:
+</p>
+
+<pre><code>bool PolicyEngine::evaluate(const std::vector&lt;Policy&gt;&amp; policies, const Request&amp; request) {
+    bool allowed = false; // default deny
+    for (const auto&amp; policy : policies) {
+        for (const auto&amp; statement : policy.statements) {
+            if (!statement.matchesAction(request.action)) continue;
+            if (!statement.matchesResource(request.resource)) continue;
+            if (statement.effect == Effect::Deny) return false;
+            allowed = true;
+        }
+    }
+    return allowed;
+}</code></pre>
+
+<p>
+That's fine for a handful of statements. It is <em>not</em> fine at the
+scale real IAM systems run at — Google's Zanzibar paper reports Google's
+authorization system serving <strong>millions of requests per second</strong>
+with p95 latency under 10ms. Re-walking every statement on every request
+doesn't get you there. The obvious fix: cache the decision.
+</p>
+
+<h2>The naive idea</h2>
+<p>
+Keep a map from <code>(principal, action, resource)</code> to the boolean
+result. First time you see a request, evaluate it the slow way and store the
+answer. Every repeat of that exact triple after that is an O(1) lookup.
+</p>
+<p>
+This is a completely reasonable instinct. It is also where almost every
+real security incident in this space starts.
+</p>
+
+<h2>Where it breaks</h2>
+<p>Walk through this sequence:</p>
+<ol>
+<li>Alice requests <code>db:read</code> on <code>urn:table:users</code>. It's evaluated, allowed, cached.</li>
+<li>An admin revokes Alice's access — a <code>Deny</code> statement is added to her policy.</li>
+<li>Alice immediately retries the exact same request.</li>
+</ol>
+<p>
+With a naive cache, step 3 returns the <em>cached</em> answer from step 1:
+<strong>Allow</strong>. Alice just read data she should no longer be able to
+touch, and nothing in the system is malfunctioning by its own local logic —
+the cache did exactly what caches do. The bug is that nobody told the cache
+the world changed.
+</p>
+
+<div class="callout">
+<div class="callout-title">The New Enemy Problem</div>
+<p>
+This exact failure mode has a name, from the Zanzibar paper: the
+<strong>new enemy problem</strong>. If Alice can act on a permission that
+was already revoked, she is — from the system's point of view — being
+treated as a trusted principal after she's become "a new enemy." Zanzibar's
+whole external-consistency design (its "zookie" tokens) exists specifically
+to make this failure mode impossible, not just unlikely.
+</p>
+</div>
+
+<p class="citation">
+Primary source for this lesson: <a href="https://research.google/pubs/zanzibar-googles-consistent-global-authorization-system/" target="_blank" rel="noopener">Zanzibar: Google's Consistent, Global Authorization System</a> (USENIX ATC 2019) — read at least the sections on external consistency and "new enemy problem" before the next lesson.
+</p>
+
+<h2>Check your understanding</h2>
+
+<div class="quiz" data-answer="b"
+     data-feedback-correct="Right — a TTL-only cache has no signal that a revoke happened. The size of the security gap is exactly the TTL, not the time until the world actually changed."
+     data-feedback-incorrect="Not quite. A plain TTL cache has no way to learn about the revoke early — nothing invalidates it until the timer runs out on its own.">
+  <p class="quiz-question">An admin revokes Bob's access. Bob immediately retries a request that was cached as Allow 3 seconds ago, under a plain 60-second TTL cache with no other invalidation. What happens?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">Bob is denied immediately; the cache clears fast</button>
+    <button class="quiz-option" data-key="b">Bob stays allowed for up to sixty seconds</button>
+    <button class="quiz-option" data-key="c">Bob's request skips the cache every single time</button>
+    <button class="quiz-option" data-key="d">Bob is denied after the next policy refresh</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="b"
+     data-feedback-correct="Correct. That's Zanzibar's own term for exactly this failure mode."
+     data-feedback-incorrect="Not quite — re-read the callout above. It's named directly after the scenario: a revoked user still acting as if trusted.">
+  <p class="quiz-question">What does the Zanzibar paper call the risk of a stale cached Allow surviving a real revoke?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">The lost update conflict</button>
+    <button class="quiz-option" data-key="b">The new enemy problem</button>
+    <button class="quiz-option" data-key="c">The split brain hazard</button>
+    <button class="quiz-option" data-key="d">The dirty read glitch</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<h2>Try it on the real codebase</h2>
+<p>
+Don't build the fix yet — that's lesson 0002, once you've read the primary
+source above. But go look at your own project with this lesson's lens:
+</p>
+<ul>
+<li>Open <a href="../../tests/test_engine.cpp"><code>tests/test_engine.cpp</code></a>
+and find <code>test_deny_from_a_different_policy_still_wins</code>. Notice
+that every test evaluates fresh — nothing is cached yet, so the new enemy
+problem doesn't exist in your engine <em>today</em>. It will the moment you
+add a cache, if you're not deliberate about invalidation.</li>
+<li>Think concretely: if you added a
+<code>std::unordered_map&lt;RequestKey, bool&gt;</code> cache in front of
+<code>PolicyEngine::evaluate</code> right now, what's the smallest change to
+<code>Policy</code> or <code>PolicyEngine</code> that would let you
+correctly invalidate it the instant a policy changes — without scanning
+every cache entry one by one?</li>
+</ul>
+<p>
+Sit with that question. Lesson 0002 covers the three real answers (TTL,
+version-stamped, event-driven) and you'll build a <code>DecisionCache</code>
+class into <code>iam-engine</code> that has a test proving it — the same way
+<code>test_engine.cpp</code> proves deny-overrides-allow today.
+</p>
+
+<p class="ask-teacher">
+If any of this is unclear — the code snippet, the scenario, the paper —
+ask your teacher (that's me) directly. Better to ask now than to carry a
+shaky mental model into lesson 0002.
+</p>
+
+<nav class="lesson-nav">
+  <span>Reference: <a href="../reference/0001-iam-caching-glossary.html">IAM caching glossary</a></span>
+  <span>Next: Lesson 0002 — invalidation strategies (not yet written)</span>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

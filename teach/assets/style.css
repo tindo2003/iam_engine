@@ -1,0 +1,197 @@
+/* Shared stylesheet for the iam-engine teaching workspace. Tufte-ish:
+   generous margins, serif reading type, restrained color, print-friendly. */
+
+:root {
+  --bg: #fdfcf9;
+  --fg: #1a1a1a;
+  --muted: #5b5b5b;
+  --rule: #d8d3c8;
+  --accent: #8a3b2e;
+  --code-bg: #f1efe8;
+  --correct: #2e6b3e;
+  --incorrect: #a3372c;
+  --max-width: 42rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171614;
+    --fg: #e9e6de;
+    --muted: #a5a096;
+    --rule: #3a382f;
+    --accent: #e08a6d;
+    --code-bg: #221f1a;
+    --correct: #6fbf7e;
+    --incorrect: #e08a80;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { color-scheme: light dark; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 1.15rem;
+  line-height: 1.6;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+}
+
+h1, h2, h3 {
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1.25;
+}
+
+h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+h2 { font-size: 1.35rem; margin-top: 2.5rem; border-top: 1px solid var(--rule); padding-top: 1.5rem; }
+h3 { font-size: 1.1rem; margin-top: 1.75rem; }
+
+.kicker {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.75rem;
+}
+
+p { margin: 1em 0; }
+
+a { color: var(--accent); }
+a:hover { text-decoration: none; }
+
+code, pre {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  background: var(--code-bg);
+  border-radius: 4px;
+}
+
+code { padding: 0.1em 0.35em; }
+pre { padding: 1em; overflow-x: auto; line-height: 1.5; }
+pre code { background: none; padding: 0; }
+
+blockquote {
+  margin: 1.5em 0;
+  padding: 0.25em 1.25em;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  font-style: italic;
+}
+
+.sidenote, .citation {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.citation::before { content: "→ "; }
+
+.callout {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1.1rem 1.3rem;
+  margin: 1.75rem 0;
+  background: color-mix(in srgb, var(--code-bg) 60%, transparent);
+}
+
+.callout-title {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 600;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  margin-bottom: 0.4rem;
+}
+
+.ask-teacher {
+  border-left: 3px solid var(--accent);
+  padding-left: 1rem;
+  font-style: italic;
+  color: var(--muted);
+}
+
+nav.lesson-nav {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.85rem;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+  border-top: 1px solid var(--rule);
+  margin-top: 3rem;
+  padding-top: 1rem;
+}
+
+nav.lesson-nav a { white-space: nowrap; }
+
+/* Quiz widget */
+.quiz {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1.25rem 1.4rem;
+  margin: 1.75rem 0;
+}
+
+.quiz-question {
+  font-weight: 600;
+  margin-top: 0;
+}
+
+.quiz-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.quiz-option {
+  font-family: inherit;
+  font-size: 0.95rem;
+  text-align: left;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.quiz-option:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.quiz-option:disabled {
+  cursor: default;
+}
+
+.quiz-option.quiz-correct {
+  border-color: var(--correct);
+  background: color-mix(in srgb, var(--correct) 15%, var(--bg));
+}
+
+.quiz-option.quiz-incorrect {
+  border-color: var(--incorrect);
+  background: color-mix(in srgb, var(--incorrect) 15%, var(--bg));
+}
+
+.quiz-feedback {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.9rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  margin-bottom: 0;
+}
+
+.quiz-feedback-correct { background: color-mix(in srgb, var(--correct) 15%, var(--bg)); color: var(--correct); }
+.quiz-feedback-incorrect { background: color-mix(in srgb, var(--incorrect) 15%, var(--bg)); color: var(--incorrect); }
+
+@media print {
+  body { max-width: 100%; font-size: 11pt; }
+  .quiz, .callout { break-inside: avoid; }
+  a { color: inherit; text-decoration: underline; }
+}

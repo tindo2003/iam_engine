@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Reference: IAM Evaluation Caching Glossary</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Reference · iam-engine teaching workspace</p>
+<h1>IAM Evaluation Caching — Glossary</h1>
+<p class="sidenote">Compressed reference for
+<a href="../lessons/0001-the-new-enemy-problem.html">Lesson 0001</a> and
+onward. Designed to be re-read, not re-derived — print this one.</p>
+
+<h3>Decision cache</h3>
+<p>
+A cache keyed by <code>(principal, action, resource)</code> (sometimes
+also the policy version) mapping to the boolean evaluation result. The
+entire point of caching in an IAM system: skip re-walking policy
+statements for a repeat request.
+</p>
+
+<h3>New enemy problem</h3>
+<p>
+Zanzibar's name for a cached <strong>Allow</strong> surviving a real
+revoke, so a principal who should have just lost access keeps acting with
+it until the cache catches up. The defining failure mode any IAM caching
+design has to rule out, not just make rare.
+</p>
+
+<h3>Invalidation strategies</h3>
+<dl>
+<dt><strong>TTL-based</strong></dt>
+<dd>Cache entries expire after a fixed time window. Simple, but the size
+of your new-enemy exposure equals the TTL. Most systems that ship
+"good enough" caching use this.</dd>
+
+<dt><strong>Version-stamped</strong></dt>
+<dd>Every policy write bumps a monotonic version counter (or, in
+Zanzibar, a "zookie" consistency token tied to a snapshot). A cached
+decision carries the version it was computed against; any write
+invalidates every entry at once by making the version stale, instead of
+hunting down individual keys.</dd>
+
+<dt><strong>Event-driven</strong></dt>
+<dd>A policy change publishes an explicit invalidation event (pub/sub) to
+every cache holder. Fastest real revocation, most infrastructure to
+build and run correctly.</dd>
+</dl>
+
+<h3>Allow/Deny caching asymmetry</h3>
+<p>
+Caching an <strong>Allow</strong> is the riskier of the two: a stale
+Allow is an active security hole. A stale <strong>Deny</strong> just
+means a legitimate user has to retry — annoying, not dangerous. Some
+systems deliberately cache denies longer or more aggressively than
+allows for exactly this reason.
+</p>
+
+<h3>Policy indexing</h3>
+<p>
+Scanning every statement on every request (what
+<code>iam-engine</code>'s current <code>PolicyEngine::evaluate</code>
+does) doesn't scale. Real engines build an index at policy-load time —
+a trie/prefix-tree keyed by action and resource — so a lookup narrows to
+a handful of candidate statements. Zanzibar's "Leopard" indexing system
+is this idea at Google's scale.
+</p>
+
+<h3>Bitmask actions</h3>
+<p>
+Map each known action string to a bit position once, at load time.
+<code>db:read | db:write</code> becomes a single integer; matching
+becomes a bitwise <code>&amp;</code> instead of a string comparison —
+directly applicable to <code>Statement::matchesAction</code> in
+<code>iam-engine</code>.
+</p>
+
+<h3>PEP / PDP / PIP / PAP</h3>
+<p>(NIST SP 800-162's ABAC architecture — not caching-specific, but the
+frame every caching decision sits inside.)</p>
+<dl>
+<dt><strong>PEP</strong> — Policy Enforcement Point</dt>
+<dd>Intercepts the request, asks the PDP for a decision, enforces it.</dd>
+<dt><strong>PDP</strong> — Policy Decision Point</dt>
+<dd>The actual evaluation engine. This is what <code>PolicyEngine</code>
+is, and what a decision cache sits in front of.</dd>
+<dt><strong>PIP</strong> — Policy Information Point</dt>
+<dd>Supplies attributes the PDP needs but doesn't already have (e.g. a
+user's department, current time).</dd>
+<dt><strong>PAP</strong> — Policy Administration Point</dt>
+<dd>Where policies are authored, tested, and stored. A write here is
+what a cache needs to notice.</dd>
+</dl>
+
+<p class="citation">
+<a href="https://research.google/pubs/zanzibar-googles-consistent-global-authorization-system/" target="_blank" rel="noopener">Zanzibar: Google's Consistent, Global Authorization System</a> ·
+<a href="https://nvlpubs.nist.gov/nistpubs/specialpublications/nist.sp.800-162.pdf" target="_blank" rel="noopener">NIST SP 800-162 (ABAC)</a>
+</p>
+
+<nav class="lesson-nav">
+  <span><a href="../lessons/0001-the-new-enemy-problem.html">&larr; Back to Lesson 0001</a></span>
+  <span></span>
+</nav>
+
+</body>
+</html>

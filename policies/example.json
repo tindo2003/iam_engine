@@ -1,0 +1,14 @@
+{
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["db:read", "db:write"],
+      "Resource": ["urn:project:database:table_users"]
+    },
+    {
+      "Effect": "Deny",
+      "Action": ["db:delete"],
+      "Resource": ["*"]
+    }
+  ]
+}
