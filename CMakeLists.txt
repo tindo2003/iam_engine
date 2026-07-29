@@ -21,7 +21,7 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_library(iam_core src/policy.cpp src/engine.cpp)
+add_library(iam_core src/policy.cpp src/engine.cpp src/cache.cpp)
 target_include_directories(iam_core PUBLIC include)
 target_link_libraries(iam_core PUBLIC nlohmann_json::nlohmann_json)
 

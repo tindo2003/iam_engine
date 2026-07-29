@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lesson 3 — At Least As Fresh: A Causal Token for iam-engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 0003 · iam-engine teaching workspace</p>
+<h1>At Least As Fresh: A Causal Token for iam-engine</h1>
+<p class="sidenote">Follows <a href="../lessons/0002-how-spicedb-actually-caches.html">Lesson 0002</a>, which built the two extremes — <code>MinimizeLatency</code> (cache-friendly, bounded staleness) and <code>FullyConsistent</code> (bypass entirely) — and explicitly left the middle ground as "a further exercise." This is that exercise.</p>
+
+<h2>The gap between the two extremes</h2>
+<p>
+<code>MinimizeLatency</code> is fast but can return a stale answer.
+<code>FullyConsistent</code> is always correct but throws the cache away —
+every single request pays the full evaluation cost, even ones that don't
+actually need that guarantee. Most real checks need something in between:
+<em>"I don't need the absolute latest state, but I do need at least
+what I already know happened."</em>
+</p>
+
+<h2>What a ZedToken actually is</h2>
+<p>
+From lesson 0001: a zookie/ZedToken is an opaque token handed back after a
+write, encoding a point in the system's causal timeline. <code>at_least_as_fresh</code>
+takes one of these tokens on a later check and guarantees the result reflects
+a snapshot <em>at or after</em> that point — never before it — while still
+allowing cache reuse for anything that already qualifies. It's the
+mechanism that makes external consistency a real, callable thing instead
+of a paper concept.
+</p>
+
+<h2>Modeling it in iam-engine</h2>
+<p>
+You don't have a real distributed transaction log, so you don't need
+anything as elaborate as SpiceDB's. A single monotonically increasing
+counter is enough to model the same idea:
+</p>
+<ul>
+<li>A <code>PolicyVersion</code> (just a <code>uint64_t</code>) that
+increments whenever the caller knows policies changed — this stands in
+for "the token returned by a write."</li>
+<li>Every cache <code>Entry</code> also records the version it was computed
+against, alongside its timestamp.</li>
+<li><code>at_least_as_fresh(minVersion)</code> semantics: a cache hit
+requires <strong>both</strong> "still within TTL" <em>and</em>
+"<code>entry.version &gt;= minVersion</code>." An entry that's
+time-fresh but version-stale is still a miss — the version floor is a
+harder requirement than the TTL, not an alternative to it.</li>
+</ul>
+<p>
+This is deliberately a stripped-down stand-in, not a faithful ZedToken —
+real Zanzibar tokens encode a globally meaningful transaction position;
+yours only needs to mean something within one <code>DecisionCache</code>
+instance. That's fine. The point of this exercise is the consistency
+<em>semantics</em>, not reproducing Zanzibar's exact wire format.
+</p>
+
+<h2>Check your understanding</h2>
+
+<div class="quiz" data-answer="b"
+     data-feedback-correct="Right — that's exactly the case at_least_as_fresh exists for: not the fastest possible answer, and not a forced bypass, but a floor on how old the answer is allowed to be."
+     data-feedback-incorrect="Not quite — re-read 'The gap between the two extremes' above. minimize_latency doesn't guarantee anything about a specific past write; fully_consistent guarantees freshness but throws away all caching.">
+  <p class="quiz-question">A client just revoked a permission and wants any of their own later checks to reflect that — but doesn't need every unrelated request in the system to also skip the cache. Which consistency level fits?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">minimize_latency, accepting the default staleness</button>
+    <button class="quiz-option" data-key="b">at_least_as_fresh, with a token from their own write</button>
+    <button class="quiz-option" data-key="c">fully_consistent, for every request in the system</button>
+    <button class="quiz-option" data-key="d">at_exact_snapshot, pinned to a fixed past revision</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Correct. The version floor is a hard requirement layered on top of the TTL check, not a replacement for it — an entry has to clear both to count as a hit."
+     data-feedback-incorrect="Not quite — re-read the last bullet in 'Modeling it in iam-engine.' A version-stale entry is a miss even if the TTL clock says it's still fresh; the two checks are independent and both must pass.">
+  <p class="quiz-question">A cache entry is 1 second old under a 60-second TTL (still clearly fresh by time), but its stored version is 3, and the caller requests at_least_as_fresh(minVersion=5). What happens?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">It's a miss — the version floor isn't satisfied</button>
+    <button class="quiz-option" data-key="b">It's a hit — the TTL window hasn't closed yet</button>
+    <button class="quiz-option" data-key="c">It's a hit, since older versions are always safe</button>
+    <button class="quiz-option" data-key="d">It's an error — versions can't be compared to TTLs</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<h2>Build it into iam-engine</h2>
+<p>Rescoped, concrete steps for your own checkout — no full code this time, you know the pattern by now from lesson 0002:</p>
+<ol>
+<li>Add a <code>using PolicyVersion = std::uint64_t;</code> (in <code>cache.hpp</code> is fine).</li>
+<li>Add a <code>version</code> field to <code>Entry</code>, and a <code>currentVersion</code> parameter to <code>put()</code> — every call to <code>put</code> needs to know what version it's storing against.</li>
+<li>Add an overload (or optional parameter) to <code>get()</code> that takes an optional <code>PolicyVersion minVersion</code>. When provided, a hit requires <code>entry.version &gt;= minVersion</code> in addition to the existing TTL check. When absent, behave exactly as today (that's what <code>MinimizeLatency</code> keeps using).</li>
+<li>Add <code>Consistency::AtLeastAsFresh</code> to the enum, and thread a <code>PolicyVersion</code> parameter through <code>evaluateCached</code> for that case.</li>
+<li>Write the test that actually matters: a cache entry stored at version 3, well within TTL, requested with <code>minVersion = 5</code> — must be a miss (re-evaluates and re-caches at the new current version), even though the exact same request under plain <code>MinimizeLatency</code> would have been a hit.</li>
+</ol>
+
+<p class="ask-teacher">
+Ask me before you start if the version-vs-TTL interaction (both must pass,
+neither alone is enough) isn't clicking yet — that's the one idea in this
+lesson worth being sure about before writing code.
+</p>
+
+<nav class="lesson-nav">
+  <span><a href="../lessons/0002-how-spicedb-actually-caches.html">&larr; Lesson 0002</a></span>
+  <span>Next: Lesson 0004 (not yet written)</span>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

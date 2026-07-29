@@ -79,8 +79,38 @@ to make this failure mode impossible, not just unlikely.
 </p>
 </div>
 
+<h3>External consistency — the guarantee that actually rules it out</h3>
+<p>
+Zanzibar doesn't just notice the new enemy problem and shrug — it commits to
+a specific consistency guarantee that prevents it: <strong>external
+consistency</strong>. Loosely: if a write (Alice's access being revoked)
+happens-before a check, from the point of view of anyone who could observe
+both events, that check is guaranteed to reflect the write. It does
+<em>not</em> require ordering every unrelated event across the whole system
+in real time — that's full linearizability, and far more expensive to
+provide at Google's scale. It only guarantees the specific causal chain a
+given client actually cares about.
+</p>
+<p>
+The mechanism is the <strong>zookie</strong>: an opaque token handed back to
+a client after every write, encoding a snapshot position. When that client
+later issues a check it needs to trust — e.g. the admin who just revoked
+Alice, confirming the revoke actually took — they pass that zookie along,
+and Zanzibar guarantees the check is evaluated against a snapshot at least
+as recent as it. Never an older, pre-revoke one.
+</p>
+<p>
+That's the real mechanism — not "the cache eventually expires." A
+Zanzibar-style system doesn't invalidate on a timer; it invalidates because
+the <em>snapshot a decision was computed against</em> is provably stale the
+moment a causally-later write exists. That's the design target for lesson
+0002's <code>DecisionCache</code>: not just "add a TTL," but "make
+staleness detectable and boundable," the way a zookie makes it detectable
+here.
+</p>
+
 <p class="citation">
-Primary source for this lesson: <a href="https://research.google/pubs/zanzibar-googles-consistent-global-authorization-system/" target="_blank" rel="noopener">Zanzibar: Google's Consistent, Global Authorization System</a> (USENIX ATC 2019) — read at least the sections on external consistency and "new enemy problem" before the next lesson.
+Primary source for this lesson: <a href="https://research.google/pubs/zanzibar-googles-consistent-global-authorization-system/" target="_blank" rel="noopener">Zanzibar: Google's Consistent, Global Authorization System</a> (USENIX ATC 2019) — read at least the sections on external consistency and the "new enemy problem" before the next lesson.
 </p>
 
 <h2>Check your understanding</h2>
@@ -111,6 +141,19 @@ Primary source for this lesson: <a href="https://research.google/pubs/zanzibar-g
   <p class="quiz-feedback" hidden></p>
 </div>
 
+<div class="quiz" data-answer="b"
+     data-feedback-correct="Right — external consistency only guarantees the specific causal chain a client cares about is ordered correctly. It's narrower (and cheaper) than ordering every event in the whole system in real time."
+     data-feedback-incorrect="Not quite — re-read the External consistency section above. It's narrower than 'everything orders in real time' (full linearizability) and stronger than 'eventually catches up' (eventual consistency): it guarantees causally related events specifically.">
+  <p class="quiz-question">Which best describes what Zanzibar's "external consistency" actually guarantees?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">Every event in the system orders in time</button>
+    <button class="quiz-option" data-key="b">Causally related writes and checks stay correctly ordered</button>
+    <button class="quiz-option" data-key="c">Cache entries always expire after a fixed time</button>
+    <button class="quiz-option" data-key="d">Checks eventually reflect writes within some time window</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
 <h2>Try it on the real codebase</h2>
 <p>
 Don't build the fix yet — that's lesson 0002, once you've read the primary
@@ -118,10 +161,10 @@ source above. But go look at your own project with this lesson's lens:
 </p>
 <ul>
 <li>Open <a href="../../tests/test_engine.cpp"><code>tests/test_engine.cpp</code></a>
-and find <code>test_deny_from_a_different_policy_still_wins</code>. Notice
-that every test evaluates fresh — nothing is cached yet, so the new enemy
-problem doesn't exist in your engine <em>today</em>. It will the moment you
-add a cache, if you're not deliberate about invalidation.</li>
+and find <code>TEST(PolicyEngine, DenyFromADifferentPolicyStillWins)</code>.
+Notice that every test evaluates fresh — nothing is cached yet, so the new
+enemy problem doesn't exist in your engine <em>today</em>. It will the
+moment you add a cache, if you're not deliberate about invalidation.</li>
 <li>Think concretely: if you added a
 <code>std::unordered_map&lt;RequestKey, bool&gt;</code> cache in front of
 <code>PolicyEngine::evaluate</code> right now, what's the smallest change to
@@ -144,7 +187,7 @@ shaky mental model into lesson 0002.
 
 <nav class="lesson-nav">
   <span>Reference: <a href="../reference/0001-iam-caching-glossary.html">IAM caching glossary</a></span>
-  <span>Next: Lesson 0002 — invalidation strategies (not yet written)</span>
+  <span>Next: <a href="../lessons/0002-how-spicedb-actually-caches.html">Lesson 0002 — How SpiceDB Actually Caches</a></span>
 </nav>
 
 <script src="../assets/quiz.js"></script>

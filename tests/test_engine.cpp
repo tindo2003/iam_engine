@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+
+#include "iam/cache.hpp"
 #include "iam/engine.hpp"
 #include "iam/policy.hpp"
 
@@ -72,4 +75,31 @@ TEST_F(PolicyEngineTest, DenyFromADifferentPolicyStillWins) {
 
     EXPECT_TRUE(PolicyEngine::evaluate(policies, Request{"alice", "db:read", "x"}));
     EXPECT_FALSE(PolicyEngine::evaluate(policies, Request{"alice", "db:delete", "x"}));
+}
+
+TEST_F(PolicyEngineTest, EvaluateCachedFullyConsistentBypassesCache) {
+    auto now = std::chrono::steady_clock::now();
+    DecisionCache cache(std::chrono::milliseconds(60'000), [&now] { return now; });
+    const std::vector<Policy> policies{allowDenyPolicy()};
+    const Request request{"alice", "db:read", "urn:table:users"};
+
+    // Poison the cache with a wrong cached answer -- proves FullyConsistent
+    // genuinely ignores it rather than just happening to agree.
+    cache.put(CacheKey{request.principal, request.action, request.resource}, false, /*version=*/1);
+
+    EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::FullyConsistent));
+}
+
+TEST_F(PolicyEngineTest, EvaluateCachedMinimizeLatencyUsesCacheOnHit) {
+    auto now = std::chrono::steady_clock::now();
+    DecisionCache cache(std::chrono::milliseconds(60'000), [&now] { return now; });
+    const std::vector<Policy> policies{allowDenyPolicy()};
+    const Request request{"alice", "db:read", "urn:table:users"};
+
+    // Seed a wrong cached answer directly, bypassing evaluate() -- if
+    // MinimizeLatency reads the cache like it should, it returns this
+    // (wrong) cached value instead of recomputing the real one.
+    cache.put(CacheKey{request.principal, request.action, request.resource}, false, /*version=*/1);
+
+    EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::MinimizeLatency));
 }

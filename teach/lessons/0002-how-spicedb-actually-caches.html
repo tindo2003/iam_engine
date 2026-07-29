@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lesson 2 — How SpiceDB Actually Caches</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 0002 · iam-engine teaching workspace</p>
+<h1>How SpiceDB Actually Caches (Quantized Time Beats Fancy Invalidation)</h1>
+<p class="sidenote">Follows <a href="../lessons/0001-the-new-enemy-problem.html">Lesson 0001</a>. That lesson ended by asking: what's the smallest change that invalidates a cache the instant a policy changes? The real answer, from a production Zanzibar implementation, is more pragmatic than the question assumed.</p>
+
+<h2>Correcting lesson 0001</h2>
+<p>
+Lesson 0001 framed the goal as "make staleness detectable and boundable,
+not just time-boxed by a TTL" — implying TTL was the lazy answer.
+<a href="https://github.com/authzed/spicedb" target="_blank" rel="noopener">SpiceDB</a>,
+a real open-source Zanzibar implementation, says otherwise: its default
+hotspot cache is a flat <strong>5-second TTL</strong>. From their own
+writeup — staleness up to that window is "perfectly acceptable" for most
+checks, because the rare case (an ACL changing inside that exact window)
+has a small, bounded blast radius.
+</p>
+<p>
+The nuance isn't "TTL vs. something smarter." It's: <strong>use a cheap TTL
+for the common case, and give callers an explicit way to demand freshness
+for the specific checks that need it</strong>. That second half is what
+lesson 0001 was missing.
+</p>
+
+<h2>What actually gets cached</h2>
+<p>
+SpiceDB doesn't cache whole top-level checks. It decomposes a check like
+<code>document:doc1#view@user:jill</code> into smaller
+<strong>subproblems</strong> — e.g. <code>document:doc1#reader@user:jill</code>,
+<code>org:acme#can_admin@user:jill</code> — and caches those. Two different
+top-level checks that happen to share a subproblem both benefit from one
+cache entry, which a whole-check cache would miss entirely.
+</p>
+
+<h2>The cache key includes a quantized timestamp</h2>
+<p>
+Every cache key carries a snapshot timestamp, not just
+<code>(subject, action, resource)</code>. Under the default
+<code>minimize_latency</code> consistency level, that timestamp is
+<strong>quantized</strong> — rounded into fixed buckets (e.g. 1-second
+windows) — so many real requests inside the same window collide onto the
+identical key. Without quantization, "the current time" is different on
+every request and the cache would never hit at all.
+</p>
+
+<h2>The escape hatch: consistency is a per-request choice</h2>
+<dl>
+<dt><strong><code>minimize_latency</code></strong> (default)</dt>
+<dd>Quantized timestamp, maximum cache reuse, bounded staleness. What
+almost every check should use.</dd>
+<dt><strong><code>fully_consistent</code></strong></dt>
+<dd>A unique timestamp every time — effectively disables caching for that
+request. Use for the one check that truly can't tolerate staleness (e.g.
+an admin confirming their own revoke just took effect).</dd>
+<dt><strong><code>at_least_as_fresh</code></strong></dt>
+<dd>Carries a <strong>ZedToken</strong> (SpiceDB's zookie from lesson
+0001) — guarantees a snapshot at least that recent, while still allowing
+cache hits for anything at or after it. This is external consistency,
+shipped as an actual API parameter.</dd>
+</dl>
+
+<h2>Why one cache per server isn't enough</h2>
+<p>
+If every server in a cluster caches independently, a cluster of N servers
+with M bytes each can still only cache M/B unique subproblems total — no
+better than one machine, just duplicated. SpiceDB routes each subproblem
+to the same node via <strong>consistent hashing</strong> (a "token
+hashring"), so the cluster's real capacity becomes N×M/B. Same idea as the
+Leopard indexing mentioned in the
+<a href="../reference/0001-iam-caching-glossary.html">caching glossary</a>,
+applied to cache placement instead of statement lookup.
+</p>
+
+<p class="citation">
+Primary sources for this lesson:
+<a href="https://authzed.com/blog/how-caching-works-in-spicedb" target="_blank" rel="noopener">How Caching Works in SpiceDB</a> ·
+<a href="https://authzed.com/blog/hotspot-caching-in-google-zanzibar-and-spicedb" target="_blank" rel="noopener">Hotspot Caching in Google Zanzibar and SpiceDB</a>
+</p>
+
+<h2>Check your understanding</h2>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Right. An exact, ever-changing timestamp would make every cache key unique — quantizing into buckets is what lets real repeat traffic actually collide onto the same key."
+     data-feedback-incorrect="Not quite — re-read 'The cache key includes a quantized timestamp' above. The exact current time is different on every request; bucketing it is what makes hits possible at all.">
+  <p class="quiz-question">Why does SpiceDB quantize its snapshot timestamps into fixed buckets instead of using the exact current time?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">To let many requests collide onto one key</button>
+    <button class="quiz-option" data-key="b">To shrink the timestamp field and save memory</button>
+    <button class="quiz-option" data-key="c">To match the database engine's internal clock speed</button>
+    <button class="quiz-option" data-key="d">To stop every request from using any cache</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Correct — and this is the correction from lesson 0001: a flat TTL is the real, shipped default, not a shortcut smarter systems avoid."
+     data-feedback-incorrect="Not quite. SpiceDB's default hotspot cache uses a plain fixed window (5 seconds), not a version counter or an event push — re-read 'Correcting lesson 0001' above.">
+  <p class="quiz-question">What does SpiceDB's default hotspot cache actually use to decide when an entry goes stale?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">A fixed time window, thrown out after it</button>
+    <button class="quiz-option" data-key="b">A version counter bumped on every policy write</button>
+    <button class="quiz-option" data-key="c">An event published the instant any write happens</button>
+    <button class="quiz-option" data-key="d">A hash comparison against the latest snapshot state</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="c"
+     data-feedback-correct="Right. fully_consistent disables caching outright for that one request, which is exactly the guarantee an admin verifying their own revoke needs."
+     data-feedback-incorrect="Not quite — minimize_latency is the cache-friendly default, which is the opposite of what's needed here. Re-read the 'escape hatch' section above.">
+  <p class="quiz-question">An admin just revoked a user's access and wants to immediately confirm it took effect. Which consistency level should that one check request?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">minimize_latency, the default quantized bucket mode</button>
+    <button class="quiz-option" data-key="b">at_least_as_fresh, with no ZedToken supplied at all</button>
+    <button class="quiz-option" data-key="c">fully_consistent, a unique timestamp for this request</button>
+    <button class="quiz-option" data-key="d">at_exact_snapshot, pinned to an old past revision</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<h2>Build it into iam-engine</h2>
+<p>
+Rescoped from lesson 0001's guess. Here's the concrete, testable version to
+build in your own <code>iam-engine</code> checkout:
+</p>
+<ol>
+<li>Add a <code>DecisionCache</code> class: key = <code>(principal, action, resource)</code>,
+value = <code>{bool decision; std::chrono::steady_clock::time_point cachedAt;}</code>.</li>
+<li>Inject the clock (a <code>std::function&lt;std::chrono::steady_clock::time_point()&gt;</code>
+defaulting to <code>std::chrono::steady_clock::now</code>) so tests can fake
+time passing without a real <code>sleep()</code> — same constructor-injection
+pattern you'd want for anything time-dependent.</li>
+<li><code>get()</code> is a hit only if <code>now - cachedAt &lt; ttl</code>;
+otherwise treat it as a miss and let the caller re-evaluate and
+<code>put()</code> a fresh entry.</li>
+<li>Add one bypass path — a <code>evaluate(..., Consistency::FullyConsistent)</code>
+overload or flag — that skips the cache unconditionally, mirroring
+<code>fully_consistent</code> above.</li>
+<li>Write <code>tests/test_cache.cpp</code> with three cases: (a) a repeat
+request inside the TTL is a cache hit (evaluate the underlying policies
+only once — you can assert this with a call counter); (b) advancing the
+fake clock past the TTL makes the same request a miss and re-evaluates;
+(c) the fully-consistent path never hits the cache regardless of TTL.</li>
+</ol>
+
+<p class="ask-teacher">
+Build it, then tell me what broke or what didn't fit the plan — that's
+more useful to work through than getting it right on the first try. Ask
+me anything that's unclear before you start, too.
+</p>
+
+<nav class="lesson-nav">
+  <span><a href="../lessons/0001-the-new-enemy-problem.html">&larr; Lesson 0001</a></span>
+  <span>Next: <a href="../lessons/0003-at-least-as-fresh.html">Lesson 0003 — At Least As Fresh</a></span>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

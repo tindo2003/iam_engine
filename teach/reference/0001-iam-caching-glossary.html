@@ -32,21 +32,25 @@ design has to rule out, not just make rare.
 <h3>Invalidation strategies</h3>
 <dl>
 <dt><strong>TTL-based</strong></dt>
-<dd>Cache entries expire after a fixed time window. Simple, but the size
-of your new-enemy exposure equals the TTL. Most systems that ship
-"good enough" caching use this.</dd>
+<dd>Cache entries expire after a fixed time window. <strong>Correction
+from lesson 0001</strong>: this isn't a fallback for lazy systems — it's
+what SpiceDB (real, production Zanzibar) actually uses by default, a flat
+5-second window. See <a href="../lessons/0002-how-spicedb-actually-caches.html">Lesson 0002</a>.</dd>
 
 <dt><strong>Version-stamped</strong></dt>
-<dd>Every policy write bumps a monotonic version counter (or, in
-Zanzibar, a "zookie" consistency token tied to a snapshot). A cached
-decision carries the version it was computed against; any write
-invalidates every entry at once by making the version stale, instead of
-hunting down individual keys.</dd>
+<dd>Every write bumps a monotonic version/timestamp; a cached decision
+carries the version it was computed against. SpiceDB's twist: it
+<em>quantizes</em> the timestamp into fixed buckets (e.g. 1-second
+windows) so many real requests collide onto the same cache key — the
+quantization is what makes the cache useful, not just correct.</dd>
 
-<dt><strong>Event-driven</strong></dt>
-<dd>A policy change publishes an explicit invalidation event (pub/sub) to
-every cache holder. Fastest real revocation, most infrastructure to
-build and run correctly.</dd>
+<dt><strong>Event-driven / opt-in strong consistency</strong></dt>
+<dd>Rather than push every write into every cache, SpiceDB pushes the
+choice to the <em>caller</em>: a request can ask for
+<code>fully_consistent</code> (bypass the cache entirely) or
+<code>at_least_as_fresh</code> (use a ZedToken to guarantee a snapshot at
+least that recent, while still allowing cache reuse). Strong consistency
+is opt-in per request, not automatic.</dd>
 </dl>
 
 <h3>Allow/Deny caching asymmetry</h3>
