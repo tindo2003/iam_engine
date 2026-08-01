@@ -27,33 +27,31 @@ bool PolicyEngine::evaluate(const std::vector<Policy>& policies, const Request& 
 bool PolicyEngine::evaluateCached(DecisionCache& cache,
                                 const std::vector<Policy>& policies,
                                 const Request& request,
-                                Consistency consistency, 
+                                Consistency consistency,
                                 PolicyVersion policy_version) {
-    // TODO:
-    // 1. Build a CacheKey from request.principal/action/resource.
-    // 2. If consistency == Consistency::FullyConsistent: skip cache.get()
-    //    entirely and just call evaluate(). Decide (and leave a comment
-    //    explaining) whether you still cache.put() the result for the next
-    //    MinimizeLatency caller, or leave the cache untouched -- both are
-    //    real, defensible choices real systems make differently.
-    // 3. Otherwise: try cache.get(key). On a hit, return it directly
-    //    (skip evaluate() -- that's the whole point). On a miss, call
-    //    evaluate(), cache.put() the result, then return it.
-    CacheKey cache_key = CacheKey{.principal = request.principal, .action = request.action, .resource = request.resource};
-    if (consistency == Consistency::FullyConsistent) {
-        bool decision = evaluate(policies, request);
-        // still cache.put() even though consistency is fully consistent
-        cache.put(cache_key, decision, policy_version);
-        return decision;
-    } else if (consistency == Consistency::AtLeastAsFresh) {
-        std::optional<bool> res = cache.get(cache_key, policy_version);
-        if (res.has_value()) {
-            return res.value();
-        } 
+    const CacheKey cache_key{.principal = request.principal, .action = request.action, .resource = request.resource};
+
+    // Deliberately exhaustive, no `default:` -- if Consistency ever grows a
+    // new value, this should fail to compile (-Wswitch) instead of silently
+    // falling into the wrong branch.
+    std::optional<bool> cached;
+    switch (consistency) {
+        case Consistency::FullyConsistent:
+            // A fully-consistent caller must never see a cached answer, so
+            // `cached` stays unset and we fall through to evaluate() below.
+            // We still cache.put() the fresh result afterward, so the next
+            // MinimizeLatency caller benefits from this evaluation.
+            break;
+        case Consistency::MinimizeLatency:
+            cached = cache.get(cache_key);
+            break;
+        case Consistency::AtLeastAsFresh:
+            cached = cache.get(cache_key, policy_version);
+            break;
     }
-    std::optional<bool> res = cache.get(cache_key);
-    if (res.has_value()) {
-        return res.value();
+
+    if (cached.has_value()) {
+        return *cached;
     }
 
     bool decision = evaluate(policies, request);

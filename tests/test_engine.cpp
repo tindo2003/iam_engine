@@ -103,3 +103,45 @@ TEST_F(PolicyEngineTest, EvaluateCachedMinimizeLatencyUsesCacheOnHit) {
 
     EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::MinimizeLatency));
 }
+
+// AtLeastAsFresh
+// I put policy_version = 1, I get min_version = 2 -> cache miss, i evaluate again 
+    // the cache at version 1 contains true 
+// I put policy_version = 3, I get min_version = 2, and time passed till less than ttl -> cache hit, i get value from the cache 
+// I put policy_version = 3, i get min_version = 2, and time passed greater than ttl -> cache miss, i evaluate again
+TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshReevaluatesOnVersionMiss) {
+    auto now = std::chrono::steady_clock::now();
+    DecisionCache cache(std::chrono::milliseconds(60'000), [&now] { return now; });
+    // empty policies, auto deny for all requests
+    const std::vector<Policy> policies; 
+    const Request request{"alice", "db:read", "urn:table:users"};
+    
+    cache.put(CacheKey{request.principal, request.action, request.resource}, true, /*version=*/1);
+    EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::AtLeastAsFresh, /*policy_version=*/2));    
+}
+
+TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshCacheHit) {
+    auto now = std::chrono::steady_clock::now();
+    DecisionCache cache(std::chrono::milliseconds(1000), [&now] { return now; });
+    // empty policies, auto deny for all requests
+    const std::vector<Policy> policies; 
+    const Request request{"alice", "db:read", "urn:table:users"}; 
+
+    cache.put(CacheKey{request.principal, request.action, request.resource}, true, /*version=*/2);
+    // cache hits because version is less (1 < 2) and time passed is less than ttl
+    now += std::chrono::milliseconds(900);
+    EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::AtLeastAsFresh, /*policy_version=*/1)); 
+}
+
+TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshReevaluatesOnTtlMiss) {
+    auto now = std::chrono::steady_clock::now();
+    DecisionCache cache(std::chrono::milliseconds(1000), [&now] { return now; });
+    // empty policies, auto deny for all requests
+    const std::vector<Policy> policies; 
+    const Request request{"alice", "db:read", "urn:table:users"}; 
+
+    cache.put(CacheKey{request.principal, request.action, request.resource}, true, /*version=*/2);
+    // cache miss time passed is greater than ttl
+    now += std::chrono::milliseconds(1100);
+    EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::AtLeastAsFresh, /*policy_version=*/1));
+}
