@@ -92,6 +92,23 @@ Primary source for this lesson: <a href="https://authzed.com/blog/hotspot-cachin
 </div>
 
 <h2>Build it into iam-engine</h2>
+
+<div class="callout">
+<div class="callout-title">Superseded — read before building</div>
+<p>
+Steps 3 and 4 below describe stamping a <em>quantized</em>
+<code>cachedAt</code> onto an entry. That was the plan when this lesson
+was written, and the reasoning it teaches still holds — but the code went
+further. <code>DecisionCache</code> was since redesigned so the snapshot
+lives in the <strong>key</strong>, not as a timestamp field on the value:
+<code>cachedAt</code> no longer exists, and <code>quantize()</code> became
+a free function used to <em>choose</em> a snapshot rather than to stamp
+one. Steps 1 and 2 survive in spirit. See
+<a href="../learning-records/0002-why-time-belongs-in-a-real-cache-key.md">learning record 0002</a>
+for what changed and why.
+</p>
+</div>
+
 <p>Scoped steps, no full skeleton this time — you've done this shape twice already:</p>
 <ol>
 <li>Add a quantization window (e.g. <code>std::chrono::milliseconds bucketSize</code>) to <code>DecisionCache</code>, alongside <code>ttl_</code>.</li>
@@ -108,7 +125,7 @@ clicks and a frustrating one to debug from first principles.
 
 <nav class="lesson-nav">
   <span><a href="../lessons/0003-at-least-as-fresh.html">&larr; Lesson 0003</a></span>
-  <span>Next: Lesson 0005 (not yet written)</span>
+  <span>Next: <a href="../lessons/0005-roles-and-subproblems.html">Lesson 0005 — Roles and Subproblems</a></span>
 </nav>
 
 <script src="../assets/quiz.js"></script>

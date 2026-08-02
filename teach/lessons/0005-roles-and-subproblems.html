@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lesson 5 — Roles, and the Subproblems They Create</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 0005 · iam-engine teaching workspace</p>
+<h1>Roles, and the Subproblems They Create</h1>
+<p class="sidenote">This looks like a detour into RBAC. It isn't. It is the prerequisite for the deepest caching idea in the material you have been reading — one that has been unreachable in this codebase from day one.</p>
+
+<h2>The thing you could not build yet</h2>
+<p>
+Go back to the SpiceDB caching article. It says something easy to skim
+past: SpiceDB does not cache whole checks. It caches
+<strong>subproblems</strong>. A check for <code>document:X#view@user:jill</code>
+decomposes into smaller questions — <code>document:X#reader@user:jill</code>,
+<code>org:theorg#can_admin@user:jill</code> — and it is <em>those</em>
+that get cached and reused across completely different top-level requests.
+</p>
+<p>
+Your <code>evaluate()</code> has no subproblems. It is one flat pass over
+a statement list. There is nothing smaller inside it to cache, and no way
+for two different requests to share any part of the work. That is not a
+gap you overlooked; it is a direct consequence of the data model.
+</p>
+<p>
+Roles change that. Once a principal resolves to a <em>set</em> of roles,
+and roles can inherit other roles, a check becomes a traversal — and each
+role visited along the way is a real, separable, reusable question.
+</p>
+
+<h2>The subproblem, and why it is shaped that way</h2>
+<p>
+Look closely at the signature in
+<a href="../../include/iam/engine.hpp"><code>engine.hpp</code></a>:
+</p>
+<pre><code>static Decision evaluateForRole(const RoleGraph&amp; graph,
+                                const RoleName&amp; role,
+                                const Request&amp; request);</code></pre>
+<p>
+Two deliberate omissions, and both exist to make the unit more shareable:
+</p>
+<ul>
+<li><strong>No principal.</strong> The answer to "does <code>engineer</code>
+allow this?" is identical for everyone holding <code>engineer</code>. Ten
+principals, one cached answer. Bake the principal in and you get ten
+identical entries that can never be shared.</li>
+<li><strong>No inheritance.</strong> It reads only the role's <em>own</em>
+policies. A smaller unit is a more reusable unit — <code>employee</code>
+gets shared by every role that inherits it, instead of being re-resolved
+inside each one.</li>
+</ul>
+<p>
+That is the same instinct as quantization from
+<a href="../lessons/0004-quantization-and-hotspots.html">lesson 0004</a>:
+deliberately shape the cache unit so that unrelated callers collide on it.
+</p>
+
+<div class="callout">
+<div class="callout-title">Why Decision has three values</div>
+<p>
+<code>evaluate()</code> can return a plain <code>bool</code> because
+default-deny is applied <em>once, globally,</em> at the very end. A single
+role cannot afford that. "This role denies" and "this role has nothing to
+say" are different facts, because a Deny anywhere in the effective role
+set has to beat an Allow anywhere else. Collapse <code>Undecided</code>
+into <code>Deny</code> and every role silently vetoes every other role —
+your engineer's Allow gets cancelled by some unrelated role that simply
+never mentioned the resource.
+</p>
+</div>
+
+<p class="citation">
+Primary source: <a href="https://authzed.com/blog/how-caching-works-in-spicedb" target="_blank" rel="noopener">How Caching Works in SpiceDB</a> (AuthZed) — reread the opening section on subproblem decomposition now that you have a concrete reason to care about it.
+</p>
+
+<h2>Check your understanding</h2>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Right. The answer is a property of the role, not of who holds it -- which is exactly what makes one cached entry serve every holder."
+     data-feedback-incorrect="Not quite -- reread 'The subproblem, and why it is shaped that way'. Think about what changes if two different principals ask the identical question of the same role.">
+  <p class="quiz-question">Why does <code>evaluateForRole</code> deliberately take no principal?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">So one answer serves every role holder</button>
+    <button class="quiz-option" data-key="b">So the role graph stays small enough</button>
+    <button class="quiz-option" data-key="c">So inherited roles resolve before the check</button>
+    <button class="quiz-option" data-key="d">So denied requests never reach the cache</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Correct. A role that never mentioned the resource would read as a Deny, and Deny outranks everything -- so a single silent role cancels every real grant."
+     data-feedback-incorrect="Not quite -- reread the callout. Remember that Deny beats Allow across the whole effective role set, then ask what happens when 'said nothing' becomes indistinguishable from Deny.">
+  <p class="quiz-question">What breaks if <code>Decision</code> folds <code>Undecided</code> into <code>Deny</code>?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">Every role silently vetoes every other role</button>
+    <button class="quiz-option" data-key="b">Inherited roles stop resolving past one level</button>
+    <button class="quiz-option" data-key="c">Cached answers outlive their real snapshot window</button>
+    <button class="quiz-option" data-key="d">Cyclic role graphs never finish being traversed</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<h2>Build it into iam-engine</h2>
+<p>
+The skeleton and its tests are already committed —
+<a href="../../include/iam/roles.hpp"><code>roles.hpp</code></a>,
+<a href="../../src/roles.cpp"><code>roles.cpp</code></a>, and
+<a href="../../tests/test_roles.cpp"><code>tests/test_roles.cpp</code></a>.
+Three TODOs, in dependency order:
+</p>
+<ol>
+<li><strong><code>RoleGraph::effectiveRoles</code></strong> — transitive
+closure over <code>inherits</code>. The visited set is not optional:
+without it, <code>CyclicInheritanceTerminates</code> does not fail, it
+<em>hangs</em>. It also stops diamond inheritance reporting a role twice.</li>
+<li><strong><code>evaluateForRole</code></strong> — the tri-state version
+of <code>evaluate()</code>'s inner loop, over one role's own policies.</li>
+<li><strong><code>evaluateRbac</code></strong> — combine. The trap: you
+cannot return <code>true</code> on the first Allow you see, because a
+later role may Deny. <code>DenyInOneRoleBeatsAllowInAnother</code> will
+catch that roughly half the time depending on iteration order, which is
+the worst kind of bug to have unpinned.</li>
+</ol>
+<pre><code>cmake --build build &amp;&amp; ctest --test-dir build -R "RoleGraph|EvaluateForRole|EvaluateRbac" --output-on-failure</code></pre>
+
+<h2>What this unlocks next</h2>
+<p>
+Once these pass, the caching payoff becomes buildable for the first time:
+a second cache keyed by <code>(role, action, resource, snapshot)</code>
+sitting under <code>evaluateForRole</code>, shared across every principal
+and every top-level request that touches that role. That is the design
+SpiceDB actually runs, and it was out of reach until roles existed.
+</p>
+<p>
+It also retroactively gives
+<a href="../../demos/snapshot_consistency_race.cpp"><code>demos/snapshot_consistency_race.cpp</code></a>
+real teeth. That demo reproduces a bug <code>evaluate()</code> cannot have,
+because it does a single read. A role traversal does many dependent reads —
+so the snapshot-pinning it argues for stops being illustrative and becomes
+load-bearing.
+</p>
+
+<p class="ask-teacher">
+The tri-state <code>Decision</code> is the one idea here worth being sure
+about before you write code. If "why can't Undecided just mean Deny" is
+not fully settled in your head, ask — it is much cheaper to resolve now
+than to debug out of a half-implemented combine step.
+</p>
+
+<nav class="lesson-nav">
+  <span><a href="../lessons/0004-quantization-and-hotspots.html">&larr; Lesson 0004</a></span>
+  <span>Next: Lesson 0006 — subproblem caching (not yet written)</span>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

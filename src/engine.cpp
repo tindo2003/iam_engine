@@ -74,4 +74,70 @@ bool PolicyEngine::evaluateCached(DecisionCache& cache,
     return decision;
 }
 
+
+Decision PolicyEngine::evaluateForRole(const RoleGraph& graph,
+                                        const RoleName& role,
+                                        const Request& request) {
+    // Reads only this role's OWN policies -- `inherits` is evaluateRbac's
+    // job. Tri-state because "denies" and "has nothing to say" must stay
+    // distinguishable; see the note on Decision in engine.hpp.
+    const Role* found = graph.find(role);
+    if (found == nullptr) {
+        return Decision::Undecided; // no such role: says nothing, denies nothing
+    }
+
+    Decision decision = Decision::Undecided;
+
+    for (const auto& policy : found->policies) {
+        for (const auto& statement : policy.statements) {
+            if (!statement.matchesAction(request.action)) {
+                continue;
+            }
+            if (!statement.matchesResource(request.resource)) {
+                continue;
+            }
+            switch (statement.effect) {
+                case Effect::Deny:
+                    return Decision::Deny; // nothing can outrank a Deny
+                case Effect::Allow:
+                    decision = Decision::Allow; // keep scanning for a later Deny
+                    break;
+            }
+        }
+    }
+
+    return decision;
+}
+
+bool PolicyEngine::evaluateRbac(const RoleGraph& graph, const Request& request) {
+    // TODO: combine the subproblems.
+    //
+    //   1. roles = graph.effectiveRoles(request.principal)
+    //   2. Ask evaluateForRole() for each one.
+    //   3. Combine:
+    //        any Deny      -> false
+    //        else any Allow -> true
+    //        else           -> false   (default deny, applied once, globally)
+    //
+    // Careful, this is the trap: you cannot return true on the first
+    // Allow you see. A later role in the set may Deny, and Deny has to
+    // win -- same rule evaluate() already follows across policies, now
+    // across roles too. You may return false early on a Deny, since
+    // nothing can outrank it.
+    std::vector<RoleName> roles = graph.effectiveRoles(request.principal);
+    std::vector<Decision> decisions;
+    for (const RoleName& role: roles) {
+        decisions.push_back(evaluateForRole(graph, role, request));
+    }
+    bool defaultDecision = false;
+    for (const Decision& decision: decisions) {
+        if (decision == Decision::Deny) {
+            return false;
+        } else if (decision == Decision::Allow) {
+            defaultDecision = true;
+        }
+    }
+    return defaultDecision;
+}
+
 } // namespace iam

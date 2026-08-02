@@ -5,9 +5,59 @@
 
 #include "iam/cache.hpp"
 #include "iam/policy.hpp"
+#include "iam/roles.hpp"
 #include "iam/types.hpp"
 
 namespace iam {
+
+// Where this file sits in the ABAC architecture (NIST SP 800-162), and
+// how the other three pieces plug in later
+// ------------------------------------------------------------------
+// PolicyEngine is the PDP -- the Policy Decision Point, and nothing else.
+// It is deliberately a set of pure static functions over explicit
+// arguments: no ownership, no stored state, no I/O. That is what keeps
+// the other three roles addable without reworking anything here.
+//
+// PEP (enforcement) would sit ABOVE this. It intercepts a real request,
+// asks the PDP, and enforces the answer. What it will want that does not
+// exist yet is a facade bundling the things evaluateRbac/evaluateCached
+// currently take one at a time -- roughly:
+//
+//     class AuthorizationService {            // future, not built
+//         RoleGraph graph_;
+//         DecisionCache cache_;
+//         Consistency defaultConsistency_;
+//     public:
+//         bool check(const Request&) const;   // PEP calls just this
+//     };
+//
+// Nothing here blocks that: it is pure composition over the existing
+// functions. Note a PEP often wants more than a bool (a reason, or
+// obligations to apply). `Decision` below is already richer than bool,
+// so widening the return type later is additive rather than a rewrite.
+//
+// PAP (administration) would sit BESIDE RoleGraph, owning the write path
+// -- see the note in roles.hpp for the one real gap it needs to close.
+//
+// PIP (attribute lookup) has no place to attach yet, and correctly so:
+// nothing in Request or Statement consults external attributes (time of
+// day, department, MFA state). Condition blocks are what would create
+// the need, and they are not built.
+
+// What one role says about a request, on its own.
+//
+// This has to be three-valued, and that is the one genuinely non-obvious
+// part of the RBAC design. evaluate() can collapse to bool because
+// default-deny applies once, globally, at the very end. A single role
+// cannot: "this role denies" and "this role has nothing to say" are
+// different facts, because a Deny anywhere in the effective role set has
+// to beat an Allow from any other role. Collapse Undecided into Deny too
+// early and every role silently vetoes every other role.
+enum class Decision {
+    Allow,
+    Deny,
+    Undecided, // no statement in this role matched the request at all
+};
 
 // How a cached lookup actually works here
 // ---------------------------------------
@@ -83,6 +133,24 @@ public:
                                 const Request& request,
                                 Consistency consistency = Consistency::MinimizeLatency,
                                 Snapshot minSnapshot = Snapshot{});
+
+    // --- RBAC -----------------------------------------------------------
+    //
+    // THE cacheable subproblem: what one role says about a request, using
+    // only its own policies and ignoring everything it inherits.
+    //
+    // Deliberately does not take a principal. That is the whole point --
+    // the answer is identical for every principal holding this role, so
+    // one cached result serves all of them. Keeping inheritance OUT of
+    // here is also deliberate: it keeps the unit small, and therefore
+    // shared by more callers.
+    static Decision evaluateForRole(const RoleGraph& graph,
+                                    const RoleName& role,
+                                    const Request& request);
+
+    // Full RBAC check: resolve the principal's effective roles, ask each
+    // one, then combine.
+    static bool evaluateRbac(const RoleGraph& graph, const Request& request);
 };
 
 } // namespace iam

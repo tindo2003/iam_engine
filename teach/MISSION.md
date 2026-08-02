@@ -52,6 +52,14 @@ production app (`used_cars_finder` is unrelated). Motivation:
 - Supporting: understand the theoretical models (NIST ABAC's PEP/PDP/PIP/PAP
   split, RBAC role graphs, Zanzibar's ReBAC/Leopard indexing) enough to know
   where caching fits in the overall evaluation pipeline.
+- **RBAC (roles + inheritance) is in scope *because* of caching, not as a
+  pivot away from it.** Added 2026-07-30. SpiceDB caches *subproblems*,
+  not whole checks — but `evaluate()` was a single flat statement scan
+  with nothing smaller inside it to cache, so that entire topic was
+  unreachable. Roles create a traversal, and each role visited is a
+  separable, reusable, cacheable question. If a future session reads
+  "caching is primary" and wonders why the work moved to role graphs,
+  this is why.
 - Secondary, lower priority than caching: role assumption, condition blocks
   (IP/time/MFA), a real AST/trie-based policy matcher (replacing the current
   trailing-`*`-only wildcard).
