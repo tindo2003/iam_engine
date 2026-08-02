@@ -11,3 +11,7 @@ gtest_discover_tests(test_cache)
 add_executable(test_roles test_roles.cpp)
 target_link_libraries(test_roles PRIVATE iam_core GTest::gtest_main Threads::Threads)
 gtest_discover_tests(test_roles)
+
+add_executable(test_service test_service.cpp)
+target_link_libraries(test_service PRIVATE iam_core GTest::gtest_main Threads::Threads)
+gtest_discover_tests(test_service)

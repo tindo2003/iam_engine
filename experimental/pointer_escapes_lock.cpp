@@ -183,6 +183,7 @@ void run(const char* label, const char* note) {
     std::atomic<size_t> reads{0};
     std::atomic<size_t> torn{0};
 
+    // reader is spawned from a thread
     std::thread reader([&] {
         while (!stop.load(std::memory_order_relaxed)) {
             auto entry = store.find("k"); // raw pointer, or shared_ptr

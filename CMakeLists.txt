@@ -21,16 +21,17 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_library(iam_core src/policy.cpp src/engine.cpp src/cache.cpp src/roles.cpp)
+find_package(Threads REQUIRED)
+
+add_library(iam_core src/policy.cpp src/engine.cpp src/cache.cpp src/roles.cpp src/service.cpp)
 target_include_directories(iam_core PUBLIC include)
-target_link_libraries(iam_core PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(iam_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
 
 add_executable(iam_demo src/main.cpp)
 target_link_libraries(iam_demo PRIVATE iam_core)
 
 # Standalone teaching demo -- deliberately not part of iam_core, see
 # demos/snapshot_consistency_race.cpp.
-find_package(Threads REQUIRED)
 add_executable(snapshot_race_demo demos/snapshot_consistency_race.cpp)
 target_link_libraries(snapshot_race_demo PRIVATE Threads::Threads)
 
