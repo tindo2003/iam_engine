@@ -7,8 +7,18 @@
 #include "iam/policy.hpp"
 
 using namespace iam;
+using std::chrono::milliseconds;
 
 namespace {
+
+constexpr milliseconds kTtl{5000};
+constexpr milliseconds kBucket{1000};
+
+// Snap a real clock reading to a bucket boundary so no test depends on
+// where wall-clock time happens to land when it runs.
+Snapshot bucketAlignedNow() {
+    return quantize(std::chrono::steady_clock::now(), kBucket);
+}
 
 class PolicyEngineTest : public ::testing::Test {
 protected:
@@ -19,6 +29,14 @@ protected:
                 {"Effect": "Deny", "Action": ["db:delete"], "Resource": ["*"]}
             ]
         })");
+    }
+
+    // allowDenyPolicy() genuinely allows this one, so any test that gets
+    // back `false` for it must have read a poisoned cache entry.
+    const Request allowedRequest{"alice", "db:read", "urn:table:users"};
+
+    CacheKey keyFor(const Request& request) const {
+        return CacheKey{request.principal, request.action, request.resource};
     }
 };
 
@@ -77,71 +95,108 @@ TEST_F(PolicyEngineTest, DenyFromADifferentPolicyStillWins) {
     EXPECT_FALSE(PolicyEngine::evaluate(policies, Request{"alice", "db:delete", "x"}));
 }
 
-TEST_F(PolicyEngineTest, EvaluateCachedFullyConsistentBypassesCache) {
-    auto now = std::chrono::steady_clock::now();
-    DecisionCache cache(std::chrono::milliseconds(60'000), [&now] { return now; });
-    const std::vector<Policy> policies{allowDenyPolicy()};
-    const Request request{"alice", "db:read", "urn:table:users"};
+// --- selectSnapshot: pure, no cache involved ---------------------------
 
-    // Poison the cache with a wrong cached answer -- proves FullyConsistent
-    // genuinely ignores it rather than just happening to agree.
-    cache.put(CacheKey{request.principal, request.action, request.resource}, false, /*version=*/1);
+TEST_F(PolicyEngineTest, SelectSnapshotMinimizeLatencyQuantizesToTheBucket) {
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot now = base + milliseconds(750);
 
-    EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::FullyConsistent));
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::MinimizeLatency, Snapshot{}, now, kBucket), base);
 }
+
+TEST_F(PolicyEngineTest, SelectSnapshotFullyConsistentUsesTheExactInstant) {
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot now = base + milliseconds(750);
+
+    // Unquantized on purpose: that is what stops it from ever colliding
+    // with the shared bucket entry.
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::FullyConsistent, Snapshot{}, now, kBucket), now);
+}
+
+TEST_F(PolicyEngineTest, SelectSnapshotAtLeastAsFreshSharesTheBucketWhenTokenIsOlder) {
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot now = base + milliseconds(750);
+    const Snapshot staleToken = base - kBucket;
+
+    // The current bucket already satisfies this token, so the request
+    // lands on the same entry MinimizeLatency traffic uses.
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::AtLeastAsFresh, staleToken, now, kBucket), base);
+}
+
+TEST_F(PolicyEngineTest, SelectSnapshotAtLeastAsFreshUsesTheTokenWhenItIsFresher) {
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot now = base + milliseconds(750);
+    const Snapshot freshToken = base + milliseconds(500);
+
+    // Token demands newer than the bucket start -> private snapshot, no
+    // sharing. That cost is the price of the stronger guarantee.
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::AtLeastAsFresh, freshToken, now, kBucket), freshToken);
+}
+
+// --- evaluateCached ----------------------------------------------------
 
 TEST_F(PolicyEngineTest, EvaluateCachedMinimizeLatencyUsesCacheOnHit) {
-    auto now = std::chrono::steady_clock::now();
-    DecisionCache cache(std::chrono::milliseconds(60'000), [&now] { return now; });
+    auto now = bucketAlignedNow();
+    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
     const std::vector<Policy> policies{allowDenyPolicy()};
-    const Request request{"alice", "db:read", "urn:table:users"};
 
-    // Seed a wrong cached answer directly, bypassing evaluate() -- if
-    // MinimizeLatency reads the cache like it should, it returns this
-    // (wrong) cached value instead of recomputing the real one.
-    cache.put(CacheKey{request.principal, request.action, request.resource}, false, /*version=*/1);
+    // Poison the shared bucket with the wrong answer; a real evaluate()
+    // would say true here, so getting false proves the cache was read.
+    cache.put(keyFor(allowedRequest), now, false);
 
-    EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::MinimizeLatency));
+    EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, allowedRequest, Consistency::MinimizeLatency));
 }
 
-// AtLeastAsFresh
-// I put policy_version = 1, I get min_version = 2 -> cache miss, i evaluate again 
-    // the cache at version 1 contains true 
-// I put policy_version = 3, I get min_version = 2, and time passed till less than ttl -> cache hit, i get value from the cache 
-// I put policy_version = 3, i get min_version = 2, and time passed greater than ttl -> cache miss, i evaluate again
-TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshReevaluatesOnVersionMiss) {
-    auto now = std::chrono::steady_clock::now();
-    DecisionCache cache(std::chrono::milliseconds(60'000), [&now] { return now; });
-    // empty policies, auto deny for all requests
-    const std::vector<Policy> policies; 
-    const Request request{"alice", "db:read", "urn:table:users"};
-    
-    cache.put(CacheKey{request.principal, request.action, request.resource}, true, /*version=*/1);
-    EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::AtLeastAsFresh, /*policy_version=*/2));    
+TEST_F(PolicyEngineTest, EvaluateCachedFullyConsistentCannotHitTheSharedBucket) {
+    // There is no cache-bypass branch any more: FullyConsistent simply
+    // selects an exact instant, which is a different key from the bucket.
+    const Snapshot base = bucketAlignedNow();
+    auto now = base + milliseconds(750);
+    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
+    const std::vector<Policy> policies{allowDenyPolicy()};
+
+    cache.put(keyFor(allowedRequest), base, false);
+
+    EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, allowedRequest, Consistency::FullyConsistent));
 }
 
-TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshCacheHit) {
-    auto now = std::chrono::steady_clock::now();
-    DecisionCache cache(std::chrono::milliseconds(1000), [&now] { return now; });
-    // empty policies, auto deny for all requests
-    const std::vector<Policy> policies; 
-    const Request request{"alice", "db:read", "urn:table:users"}; 
+TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshSharesTheMinimizeLatencyBucket) {
+    const Snapshot base = bucketAlignedNow();
+    auto now = base + milliseconds(750);
+    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
+    const std::vector<Policy> policies{allowDenyPolicy()};
 
-    cache.put(CacheKey{request.principal, request.action, request.resource}, true, /*version=*/2);
-    // cache hits because version is less (1 < 2) and time passed is less than ttl
-    now += std::chrono::milliseconds(900);
-    EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::AtLeastAsFresh, /*policy_version=*/1)); 
+    cache.put(keyFor(allowedRequest), base, false);
+
+    // Old token -> satisfied by the bucket -> reuses that very entry.
+    EXPECT_FALSE(PolicyEngine::evaluateCached(
+        cache, policies, allowedRequest, Consistency::AtLeastAsFresh, base - kBucket));
 }
 
-TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshReevaluatesOnTtlMiss) {
-    auto now = std::chrono::steady_clock::now();
-    DecisionCache cache(std::chrono::milliseconds(1000), [&now] { return now; });
-    // empty policies, auto deny for all requests
-    const std::vector<Policy> policies; 
-    const Request request{"alice", "db:read", "urn:table:users"}; 
+TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshMissesWhenTokenIsFresherThanTheBucket) {
+    const Snapshot base = bucketAlignedNow();
+    auto now = base + milliseconds(750);
+    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
+    const std::vector<Policy> policies{allowDenyPolicy()};
 
-    cache.put(CacheKey{request.principal, request.action, request.resource}, true, /*version=*/2);
-    // cache miss time passed is greater than ttl
-    now += std::chrono::milliseconds(1100);
-    EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, request, Consistency::AtLeastAsFresh, /*policy_version=*/1));
+    cache.put(keyFor(allowedRequest), base, false);
+
+    // Token newer than the bucket start -> different key -> real evaluation.
+    EXPECT_TRUE(PolicyEngine::evaluateCached(
+        cache, policies, allowedRequest, Consistency::AtLeastAsFresh, base + milliseconds(500)));
+}
+
+TEST_F(PolicyEngineTest, EvaluateCachedPopulatesTheCacheForTheNextCaller) {
+    auto now = bucketAlignedNow();
+    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
+    const std::vector<Policy> policies{allowDenyPolicy()};
+
+    ASSERT_EQ(cache.size(), 0u);
+    EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, allowedRequest));
+    EXPECT_EQ(cache.size(), 1u);
+
+    // Second call at the same bucket now hits rather than re-evaluating.
+    const auto cached = cache.get(keyFor(allowedRequest), now);
+    ASSERT_TRUE(cached.has_value());
+    EXPECT_TRUE(*cached);
 }

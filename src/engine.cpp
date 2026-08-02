@@ -24,38 +24,53 @@ bool PolicyEngine::evaluate(const std::vector<Policy>& policies, const Request& 
     return allowed;
 }
 
+Snapshot PolicyEngine::selectSnapshot(Consistency consistency,
+                                    Snapshot minSnapshot,
+                                    Snapshot now,
+                                    std::chrono::milliseconds bucketSize) {
+    // Deliberately exhaustive, no `default:` -- if Consistency ever grows a
+    // new value, this should fail to compile (-Wswitch) instead of silently
+    // falling into the wrong branch.
+    switch (consistency) {
+        case Consistency::MinimizeLatency:
+            // Everyone in this window computes the same bucket, so they all
+            // share one cache entry by construction.
+            return quantize(now, bucketSize);
+
+        case Consistency::AtLeastAsFresh: {
+            // If the shared bucket already satisfies the caller's token,
+            // reuse it -- that is the common case, and it means a
+            // token-bearing request still shares with MinimizeLatency
+            // traffic. Only a token newer than the bucket forces a private,
+            // unshared snapshot.
+            const Snapshot bucket = quantize(now, bucketSize);
+            return bucket >= minSnapshot ? bucket : minSnapshot;
+        }
+
+        case Consistency::FullyConsistent:
+            // Exact instant, unquantized: essentially never collides with
+            // an existing key, which is what disables reuse. No explicit
+            // cache bypass needed anywhere.
+            return now;
+    }
+
+    return now; // unreachable; keeps -Wreturn-type quiet
+}
+
 bool PolicyEngine::evaluateCached(DecisionCache& cache,
                                 const std::vector<Policy>& policies,
                                 const Request& request,
                                 Consistency consistency,
-                                PolicyVersion policy_version) {
+                                Snapshot minSnapshot) {
     const CacheKey cache_key{.principal = request.principal, .action = request.action, .resource = request.resource};
+    const Snapshot snapshot = selectSnapshot(consistency, minSnapshot, cache.now(), cache.bucketSize());
 
-    // Deliberately exhaustive, no `default:` -- if Consistency ever grows a
-    // new value, this should fail to compile (-Wswitch) instead of silently
-    // falling into the wrong branch.
-    std::optional<bool> cached;
-    switch (consistency) {
-        case Consistency::FullyConsistent:
-            // A fully-consistent caller must never see a cached answer, so
-            // `cached` stays unset and we fall through to evaluate() below.
-            // We still cache.put() the fresh result afterward, so the next
-            // MinimizeLatency caller benefits from this evaluation.
-            break;
-        case Consistency::MinimizeLatency:
-            cached = cache.get(cache_key);
-            break;
-        case Consistency::AtLeastAsFresh:
-            cached = cache.get(cache_key, policy_version);
-            break;
-    }
-
-    if (cached.has_value()) {
+    if (std::optional<bool> cached = cache.get(cache_key, snapshot)) {
         return *cached;
     }
 
-    bool decision = evaluate(policies, request);
-    cache.put(cache_key, decision, policy_version);
+    const bool decision = evaluate(policies, request);
+    cache.put(cache_key, snapshot, decision);
     return decision;
 }
 
