@@ -123,46 +123,61 @@ public:
                                 Snapshot minSnapshot = Snapshot{});
 
     // --- RBAC -----------------------------------------------------------
-    //
-    // THE cacheable subproblem: what one role says about a request, using
-    // only its own policies and ignoring everything it inherits.
-    //
-    // Deliberately does not take a principal. That is the whole point --
-    // the answer is identical for every principal holding this role, so
-    // one cached result serves all of them. Keeping inheritance OUT of
-    // here is also deliberate: it keeps the unit small, and therefore
-    // shared by more callers.
-    static Decision evaluateForRole(const RoleGraph& graph,
-                                    const RoleName& role,
-                                    const Request& request);
 
     // Full RBAC check: resolve the principal's effective roles, ask each
     // one, then combine.
     static bool evaluateRbac(const RoleGraph& graph, const Request& request);
 
-    // --- The two cache layers -------------------------------------------
+    // The same check, through both cache layers. Layer 1 (`checkCache`)
+    // short-circuits an identical repeat request; on a miss, layer 2
+    // (`subproblemCache`) still lets this check reuse per-role work done
+    // for OTHER principals -- alice's check warms the cache for bob.
     //
-    // Layer 2 (subproblem). Keyed on the ROLE, not the principal, so every
-    // holder of that role shares one entry: alice's check warms the cache
-    // for bob. `subproblemCache` must be a different instance from the
-    // whole-check cache -- that separation is what keeps a role named
-    // "alice" from colliding with a principal named "alice".
-    static Decision evaluateForRoleCached(DecisionCache& subproblemCache,
-                                            const RoleGraph& graph,
-                                            const RoleName& role,
-                                            const Request& request,
-                                            Consistency consistency = Consistency::MinimizeLatency,
-                                            Snapshot minSnapshot = Snapshot{});
-
-    // Both layers together. Layer 1 (`checkCache`) short-circuits an
-    // identical repeat request; on a miss, layer 2 (`subproblemCache`) still
-    // lets this check reuse per-role work done for other principals.
+    // The two caches must be separate instances. They build structurally
+    // identical keys and differ only in what the key's `subject` means, so
+    // sharing one lets a role and a principal of the same name collide.
+    // Asserted at runtime in debug builds.
     static bool evaluateRbacCached(DecisionCache& checkCache,
                                     DecisionCache& subproblemCache,
                                     const RoleGraph& graph,
                                     const Request& request,
                                     Consistency consistency = Consistency::MinimizeLatency,
                                     Snapshot minSnapshot = Snapshot{});
+
+private:
+    // --- The subproblem layer, deliberately not public -------------------
+    //
+    // These are the internals of the RBAC decomposition, not a surface
+    // callers should reach for. Both are easy to misuse from outside:
+    //
+    //   * evaluateForRole deliberately IGNORES `inherits`, so calling it
+    //     standalone answers a narrower question than it looks like it
+    //     does;
+    //   * evaluateForRoleCached takes the subproblem cache directly, which
+    //     is exactly the instance a caller must not confuse with the
+    //     whole-check one.
+    //
+    // Their behaviour is still pinned by tests -- through evaluateRbac and
+    // evaluateRbacCached, which is where it is externally observable. What
+    // is NOT pinned any more is their internal contract (ignoring
+    // inheritance, ignoring the principal), and that is the point: those
+    // are free to change as long as the public behaviour holds.
+
+    // THE cacheable unit: what one role says about a request, using only
+    // its own policies. Takes no principal, because the answer is
+    // identical for every principal holding the role -- which is what lets
+    // one cached result serve all of them.
+    static Decision evaluateForRole(const RoleGraph& graph,
+                                    const RoleName& role,
+                                    const Request& request);
+
+    // Cached form of the above, keyed on the role rather than the caller.
+    static Decision evaluateForRoleCached(DecisionCache& subproblemCache,
+                                            const RoleGraph& graph,
+                                            const RoleName& role,
+                                            const Request& request,
+                                            Consistency consistency = Consistency::MinimizeLatency,
+                                            Snapshot minSnapshot = Snapshot{});
 };
 
 } // namespace iam
