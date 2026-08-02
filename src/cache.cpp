@@ -36,14 +36,18 @@ DecisionCache::DecisionCache(std::chrono::milliseconds ttl, Clock clock, std::ch
 std::optional<Decision> DecisionCache::get(const CacheKey& key, Snapshot snapshot) const {
     auto it = entries_.find(key);
     if (it == entries_.end()) {
+        ++misses_;
         return std::nullopt;
     }
 
     const auto& snapshots = it->second;
     auto snapIt = snapshots.find(snapshot);
     if (snapIt == snapshots.end()) {
-        return std::nullopt; // this identity has been checked, but not at this snapshot
+        ++misses_; // this identity has been checked, but not at this snapshot
+        return std::nullopt;
     }
+
+    ++hits_;
     return snapIt->second;
 }
 
@@ -66,6 +70,19 @@ Snapshot DecisionCache::now() const {
 
 std::chrono::milliseconds DecisionCache::bucketSize() const {
     return bucket_;
+}
+
+size_t DecisionCache::hits() const {
+    return hits_;
+}
+
+size_t DecisionCache::misses() const {
+    return misses_;
+}
+
+void DecisionCache::resetCounters() {
+    hits_ = 0;
+    misses_ = 0;
 }
 
 size_t DecisionCache::size() const {

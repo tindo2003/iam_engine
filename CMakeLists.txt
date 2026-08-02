@@ -34,5 +34,11 @@ find_package(Threads REQUIRED)
 add_executable(snapshot_race_demo demos/snapshot_consistency_race.cpp)
 target_link_libraries(snapshot_race_demo PRIVATE Threads::Threads)
 
+# Benchmarks. Release-mode by default -- measuring a debug build tells you
+# very little about a cache.
+add_executable(cache_bench bench/cache_bench.cpp)
+target_link_libraries(cache_bench PRIVATE iam_core)
+target_compile_options(cache_bench PRIVATE -O2 -DNDEBUG)
+
 enable_testing()
 add_subdirectory(tests)

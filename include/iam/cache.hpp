@@ -89,6 +89,13 @@ public:
     // Total entries across every identity. Exposed for eviction tests.
     size_t size() const;
 
+    // Hit/miss counters. Not test scaffolding -- a cache that cannot
+    // report its own hit rate is a cache nobody can tune, and real ones
+    // (SpiceDB included) export exactly these.
+    size_t hits() const;
+    size_t misses() const;
+    void resetCounters();
+
 private:
     // Drops snapshots older than `ttl_` for one identity. Runs on put, so
     // only identities being actively written get swept.
@@ -102,6 +109,8 @@ private:
     std::chrono::milliseconds ttl_;
     Clock clock_;
     std::chrono::milliseconds bucket_;
+    mutable size_t hits_{0};
+    mutable size_t misses_{0};
     std::unordered_map<CacheKey, std::map<Snapshot, Decision>, CacheKeyHash> entries_;
 };
 
