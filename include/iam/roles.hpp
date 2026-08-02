@@ -49,8 +49,8 @@ struct Role {
 //
 //     Snapshot revision() const;   // future, not built
 //
-// Then evaluateCached's snapshot can be tied to a real write instead of
-// asserted by whoever calls it, and a ZedToken handed back from a write
+// Then evaluateRbacCached's snapshot can be tied to a real write rather
+// than asserted by whoever calls it, and a ZedToken handed back from a write
 // becomes meaningful. That change is purely additive -- no existing
 // signature has to move -- which is why it is safe to defer.
 class RoleGraph {

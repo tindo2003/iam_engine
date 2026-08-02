@@ -20,8 +20,8 @@ namespace iam {
 //
 // PEP (enforcement) would sit ABOVE this. It intercepts a real request,
 // asks the PDP, and enforces the answer. What it will want that does not
-// exist yet is a facade bundling the things evaluateRbac/evaluateCached
-// currently take one at a time -- roughly:
+// exist yet is a facade bundling the things evaluateRbac and
+// evaluateRbacCached currently take one at a time -- roughly:
 //
 //     class AuthorizationService {            // future, not built
 //         RoleGraph graph_;
@@ -81,7 +81,7 @@ namespace iam {
 // else will ever share. That cost is the price of the stronger guarantee.
 //
 // Row 7 shows FullyConsistent missing purely because of the key it
-// picked. There is no bypass logic anywhere in evaluateCached.
+// picked. There is no bypass logic anywhere in evaluateRbacCached.
 
 // Mirrors SpiceDB's per-request consistency levels. Each one is really
 // just a different rule for choosing WHICH snapshot to evaluate at --
@@ -112,15 +112,6 @@ public:
                                     Snapshot minSnapshot,
                                     Snapshot now,
                                     std::chrono::milliseconds bucketSize);
-
-    // Same evaluation, reading through `cache`. One code path for every
-    // consistency level -- the level only influences which snapshot gets
-    // selected above.
-    static bool evaluateCached(DecisionCache& cache,
-                                const std::vector<Policy>& policies,
-                                const Request& request,
-                                Consistency consistency = Consistency::MinimizeLatency,
-                                Snapshot minSnapshot = Snapshot{});
 
     // --- RBAC -----------------------------------------------------------
 

@@ -93,28 +93,6 @@ Snapshot PolicyEngine::selectSnapshot(Consistency consistency,
     return now; // unreachable; keeps -Wreturn-type quiet
 }
 
-bool PolicyEngine::evaluateCached(DecisionCache& cache,
-                                const std::vector<Policy>& policies,
-                                const Request& request,
-                                Consistency consistency,
-                                Snapshot minSnapshot) {
-    const CacheKey cache_key{.subject = request.principal, .action = request.action, .resource = request.resource};
-    const Snapshot snapshot = selectSnapshot(consistency, minSnapshot, cache.now(), cache.bucketSize());
-
-    // A whole-check answer is genuinely binary -- global default-deny has
-    // already been applied by evaluate() -- so this layer only ever stores
-    // Allow or Deny, never Undecided. The tri-state value type exists for
-    // the subproblem layer, which shares this same cache type.
-    if (std::optional<Decision> cached = cache.get(cache_key, snapshot)) {
-        return *cached == Decision::Allow;
-    }
-
-    const bool decision = evaluate(policies, request);
-    cache.put(cache_key, snapshot, decision ? Decision::Allow : Decision::Deny);
-    return decision;
-}
-
-
 Decision PolicyEngine::evaluateForRole(const RoleGraph& graph,
                                         const RoleName& role,
                                         const Request& request) {
@@ -184,9 +162,8 @@ Decision PolicyEngine::evaluateForRoleCached(DecisionCache& subproblemCache,
                                             Snapshot minSnapshot) {
     // TODO: the cached wrapper around evaluateForRole().
     //
-    // Same shape as evaluateCached() above -- build a key, pick a
-    // snapshot with selectSnapshot(), try the cache, compute + store on a
-    // miss. Two differences that matter:
+    // Build a key, pick a snapshot with selectSnapshot(), try the cache,
+    // compute + store on a miss. Two things to note:
     //
     //   1. The key's `subject` is the ROLE name, not request.principal.
     //      Everything else (action, resource) still comes from `request`.

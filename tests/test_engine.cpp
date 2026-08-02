@@ -50,10 +50,6 @@ protected:
             ]
         })");
     }
-
-    CacheKey keyFor(const Request& request) const {
-        return CacheKey{request.principal, request.action, request.resource};
-    }
 };
 
 } // namespace
@@ -147,74 +143,6 @@ TEST_F(PolicyEngineTest, SelectSnapshotAtLeastAsFreshUsesTheTokenWhenItIsFresher
     // Token demands newer than the bucket start -> private snapshot, no
     // sharing. That cost is the price of the stronger guarantee.
     EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::AtLeastAsFresh, freshToken, now, kBucket), freshToken);
-}
-
-// --- evaluateCached ----------------------------------------------------
-
-TEST_F(PolicyEngineTest, EvaluateCachedMinimizeLatencyUsesCacheOnHit) {
-    auto now = bucketAlignedNow();
-    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
-    const std::vector<Policy> policies{allowDenyPolicy()};
-
-    // Poison the shared bucket with the wrong answer; a real evaluate()
-    // would say true here, so getting false proves the cache was read.
-    cache.put(keyFor(kRead), now, Decision::Deny);
-
-    EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, kRead, Consistency::MinimizeLatency));
-}
-
-TEST_F(PolicyEngineTest, EvaluateCachedFullyConsistentCannotHitTheSharedBucket) {
-    // There is no cache-bypass branch any more: FullyConsistent simply
-    // selects an exact instant, which is a different key from the bucket.
-    const Snapshot base = bucketAlignedNow();
-    auto now = base + milliseconds(750);
-    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
-    const std::vector<Policy> policies{allowDenyPolicy()};
-
-    cache.put(keyFor(kRead), base, Decision::Deny);
-
-    EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, kRead, Consistency::FullyConsistent));
-}
-
-TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshSharesTheMinimizeLatencyBucket) {
-    const Snapshot base = bucketAlignedNow();
-    auto now = base + milliseconds(750);
-    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
-    const std::vector<Policy> policies{allowDenyPolicy()};
-
-    cache.put(keyFor(kRead), base, Decision::Deny);
-
-    // Old token -> satisfied by the bucket -> reuses that very entry.
-    EXPECT_FALSE(PolicyEngine::evaluateCached(
-        cache, policies, kRead, Consistency::AtLeastAsFresh, base - kBucket));
-}
-
-TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshMissesWhenTokenIsFresherThanTheBucket) {
-    const Snapshot base = bucketAlignedNow();
-    auto now = base + milliseconds(750);
-    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
-    const std::vector<Policy> policies{allowDenyPolicy()};
-
-    cache.put(keyFor(kRead), base, Decision::Deny);
-
-    // Token newer than the bucket start -> different key -> real evaluation.
-    EXPECT_TRUE(PolicyEngine::evaluateCached(
-        cache, policies, kRead, Consistency::AtLeastAsFresh, base + milliseconds(500)));
-}
-
-TEST_F(PolicyEngineTest, EvaluateCachedPopulatesTheCacheForTheNextCaller) {
-    auto now = bucketAlignedNow();
-    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
-    const std::vector<Policy> policies{allowDenyPolicy()};
-
-    ASSERT_EQ(cache.size(), 0u);
-    EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, kRead));
-    EXPECT_EQ(cache.size(), 1u);
-
-    // Second call at the same bucket now hits rather than re-evaluating.
-    const auto cached = cache.get(keyFor(kRead), now);
-    ASSERT_TRUE(cached.has_value());
-    EXPECT_EQ(*cached, Decision::Allow);
 }
 
 // --- evaluateRbac (public) ---------------------------------------------
@@ -438,4 +366,62 @@ TEST(RbacCached, CachesUndecidedRolesRatherThanSkippingThem) {
     const auto cached = subproblemCache.get(CacheKey{"engineer", "db:read", "urn:table:users"}, now);
     ASSERT_TRUE(cached.has_value());
     EXPECT_EQ(*cached, Decision::Undecided);
+}
+
+// Consistency-level integration, now that evaluateRbacCached is the only
+// cached entry point. selectSnapshot is unit-tested above; these check
+// the wiring actually honours what it returns.
+
+TEST(RbacCached, FullyConsistentCannotHitTheSharedBucket) {
+    const Snapshot base = bucketAlignedNow();
+    auto now = base + milliseconds(750);
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "engineer");
+
+    // Poison the shared bucket. FullyConsistent selects an exact instant,
+    // which is a different key, so it cannot reach this entry.
+    checkCache.put(CacheKey{"alice", "db:read", "urn:table:users"}, base, Decision::Deny);
+
+    EXPECT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead,
+                                                    Consistency::FullyConsistent));
+}
+
+TEST(RbacCached, AtLeastAsFreshSharesTheMinimizeLatencyBucket) {
+    const Snapshot base = bucketAlignedNow();
+    auto now = base + milliseconds(750);
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "engineer");
+
+    checkCache.put(CacheKey{"alice", "db:read", "urn:table:users"}, base, Decision::Deny);
+
+    // Old token -> already satisfied by the bucket -> reuses that entry.
+    EXPECT_FALSE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead,
+                                                    Consistency::AtLeastAsFresh, base - kBucket));
+}
+
+TEST(RbacCached, AtLeastAsFreshMissesWhenTokenIsFresherThanTheBucket) {
+    const Snapshot base = bucketAlignedNow();
+    auto now = base + milliseconds(750);
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "engineer");
+
+    checkCache.put(CacheKey{"alice", "db:read", "urn:table:users"}, base, Decision::Deny);
+
+    // Token demands newer than the bucket start -> different key -> real
+    // evaluation, so the poisoned entry is not reached.
+    EXPECT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead,
+                                                    Consistency::AtLeastAsFresh,
+                                                    base + milliseconds(500)));
 }
