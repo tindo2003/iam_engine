@@ -335,3 +335,58 @@ TEST(RbacCached, StillHonoursDenyAcrossRoles) {
 
     EXPECT_FALSE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
 }
+
+// --- Name collisions between the two layers ----------------------------
+//
+// The layers key on the same shape and differ only in what `subject`
+// means, so a role and a person sharing a name is the interesting case.
+// Separate DecisionCache instances are what keep them apart; these pin
+// that both directions stay correct.
+
+TEST(RbacCached, PersonNamedLikeARoleDoesNotInheritIt) {
+    auto now = bucketAlignedNow();
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+
+    RoleGraph graph;
+    graph.addRole(Role{"employee", {allow("db:read", "urn:table:handbook")}, {}});
+    graph.assign("alice", "employee");
+    // NOTE: the person literally named "employee" holds no roles at all.
+
+    const Request aliceReads{"alice", "db:read", "urn:table:handbook"};
+    const Request personNamedEmployee{"employee", "db:read", "urn:table:handbook"};
+
+    // Alice's check populates the subproblem layer under subject "employee"
+    // -- meaning the ROLE.
+    ASSERT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, aliceReads));
+    ASSERT_EQ(subproblemCache.size(), 1u);
+
+    // The PERSON of the same name must not pick that up. Sharing one cache
+    // between the layers would return true here: privilege escalation by
+    // name collision.
+    EXPECT_FALSE(
+        PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, personNamedEmployee));
+}
+
+TEST(RbacCached, RoleNamedLikeAPersonIsNotPoisonedByThem) {
+    // Same collision, opposite order and opposite failure: the person's
+    // cached denial must not be read back as the role's answer.
+    auto now = bucketAlignedNow();
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+
+    RoleGraph graph;
+    graph.addRole(Role{"employee", {allow("db:read", "urn:table:handbook")}, {}});
+    graph.assign("alice", "employee");
+
+    const Request personNamedEmployee{"employee", "db:read", "urn:table:handbook"};
+    const Request aliceReads{"alice", "db:read", "urn:table:handbook"};
+
+    // The role-less person goes first and is correctly denied.
+    ASSERT_FALSE(
+        PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, personNamedEmployee));
+
+    // Alice still gets her grant. With one shared cache the subproblem
+    // lookup for role "employee" would hit the person's Deny instead.
+    EXPECT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, aliceReads));
+}

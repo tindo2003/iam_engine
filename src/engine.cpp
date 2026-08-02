@@ -1,5 +1,7 @@
 #include "iam/engine.hpp"
 
+#include <cassert>
+
 namespace iam {
 namespace {
 
@@ -231,6 +233,26 @@ bool PolicyEngine::evaluateRbacCached(DecisionCache& checkCache,
     // at the end. Consider whether you can just reuse that logic rather
     // than writing the loop a second time -- two copies of a combine rule
     // is exactly how they drift apart later.
+    // The two layers MUST be separate instances. They build structurally
+    // identical keys and differ only in what `subject` means, so sharing
+    // one cache lets a role and a principal of the same name collide --
+    // in both directions, and both are security bugs:
+    //
+    //   * a person named "employee" would hit the "employee" ROLE's
+    //     cached Allow and inherit a role they were never assigned;
+    //   * conversely, that person's cached Deny would be read back as the
+    //     role's answer, wrongly denying everyone who holds it.
+    //
+    // Pinned by PersonNamedLikeARoleDoesNotInheritIt and
+    // RoleNamedLikeAPersonIsNotPoisonedByThem.
+    //
+    // Caveat: this is a debug-only guard, compiled out under NDEBUG. The
+    // stronger fix is to give the two layers distinct wrapper types so
+    // passing the wrong one cannot compile at all -- worth doing if this
+    // ever grows more call sites.
+    assert(&checkCache != &subproblemCache &&
+            "checkCache and subproblemCache must be separate instances");
+
     const CacheKey check_key{.subject = request.principal,
                             .action = request.action,
                             .resource = request.resource};
