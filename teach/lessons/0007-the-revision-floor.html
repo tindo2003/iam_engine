@@ -61,12 +61,41 @@ exactly the ones that would not be protected.
 </p>
 </div>
 
+<h2>Who is doing the writing?</h2>
+<p>
+"A write" here means exactly one thing: somebody called
+<code>addRole()</code> or <code>assign()</code>. Conceptually that is the
+PAP's job — an admin console, an HR sync, a Terraform apply. Concretely
+there is no PAP in this project, so it is simply whoever holds a
+non-<code>const RoleGraph&amp;</code>. In the test below, it is the test.
+</p>
+<p>
+The read/write split is already drawn correctly, though: every
+<code>PolicyEngine</code> function takes <code>const RoleGraph&amp;</code>,
+so the decision path structurally <em>cannot</em> write. Only a caller
+with a mutable reference can — and that caller is the PAP-shaped hole.
+</p>
+<p>
+Two things a real PAP would add that this does not.
+<strong>Authorisation of the write itself</strong>: right now anyone with
+a mutable reference can hand alice any role. That is a genuinely
+recursive problem — "who may change policy" is an authorization question,
+which AWS answers by having IAM check <code>iam:PutRolePolicy</code>, so
+a real PAP calls back into the PDP to authorise its own operations.
+<strong>An authoritative clock</strong>: here <code>revision_ =
+clock_()</code> is stamped by the graph itself. In Zanzibar the write goes
+to Spanner and <em>Spanner</em> assigns the TrueTime timestamp — the
+revision is a fact the database asserts, globally ordered across every
+writer. The local version works for one in-process graph and falls apart
+the moment there are two writers on two machines.
+</p>
+
 <h2>Why this does not wreck sharing</h2>
 <p>
 The obvious worry: if a write drags everyone onto an unquantized
 timestamp, does each request get its own private key? No — because they
-all get the <em>same</em> one. Write at <code>t=1500</code>, bucket
-<code>1000</code>:
+all get the <em>same</em> one. Take a write at <code>t=1500</code> with a
+<code>1000</code>ms bucket:
 </p>
 <pre><code>request at   quantize(now)   revision   snapshot   shared?
    1600          1000          1500       1500     yes -- with all others
