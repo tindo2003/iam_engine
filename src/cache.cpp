@@ -5,12 +5,12 @@ namespace iam {
 bool CacheKey::operator==(const CacheKey& other) const {
     return
         action == other.action
-        && principal == other.principal
+        && subject == other.subject
         && resource == other.resource;
 }
 
 size_t CacheKeyHash::operator()(const CacheKey& key) const {
-    size_t h = std::hash<std::string>{}(key.principal);
+    size_t h = std::hash<std::string>{}(key.subject);
     h ^= std::hash<std::string>{}(key.action) + 0x9e3779b9 + (h << 6) + (h >> 2);
     h ^= std::hash<std::string>{}(key.resource) + 0x9e3779b9 + (h << 6) + (h >> 2);
     return h;
@@ -33,7 +33,7 @@ Snapshot quantize(Snapshot t, std::chrono::milliseconds bucket) {
 DecisionCache::DecisionCache(std::chrono::milliseconds ttl, Clock clock, std::chrono::milliseconds bucketSize)
     : ttl_(ttl), clock_(std::move(clock)), bucket_(bucketSize) {}
 
-std::optional<bool> DecisionCache::get(const CacheKey& key, Snapshot snapshot) const {
+std::optional<Decision> DecisionCache::get(const CacheKey& key, Snapshot snapshot) const {
     auto it = entries_.find(key);
     if (it == entries_.end()) {
         return std::nullopt;
@@ -47,13 +47,13 @@ std::optional<bool> DecisionCache::get(const CacheKey& key, Snapshot snapshot) c
     return snapIt->second;
 }
 
-void DecisionCache::put(const CacheKey& key, Snapshot snapshot, bool decision) {
+void DecisionCache::put(const CacheKey& key, Snapshot snapshot, Decision decision) {
     auto& snapshots = entries_[key];
     snapshots[snapshot] = decision;
     evict(snapshots);
 }
 
-void DecisionCache::evict(std::map<Snapshot, bool>& snapshots) {
+void DecisionCache::evict(std::map<Snapshot, Decision>& snapshots) {
     const Snapshot cutoff = clock_() - ttl_;
     // lower_bound(cutoff) is the first snapshot >= cutoff, so everything
     // before it is strictly older than the retention window.

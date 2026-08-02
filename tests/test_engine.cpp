@@ -142,7 +142,7 @@ TEST_F(PolicyEngineTest, EvaluateCachedMinimizeLatencyUsesCacheOnHit) {
 
     // Poison the shared bucket with the wrong answer; a real evaluate()
     // would say true here, so getting false proves the cache was read.
-    cache.put(keyFor(allowedRequest), now, false);
+    cache.put(keyFor(allowedRequest), now, Decision::Deny);
 
     EXPECT_FALSE(PolicyEngine::evaluateCached(cache, policies, allowedRequest, Consistency::MinimizeLatency));
 }
@@ -155,7 +155,7 @@ TEST_F(PolicyEngineTest, EvaluateCachedFullyConsistentCannotHitTheSharedBucket) 
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
     const std::vector<Policy> policies{allowDenyPolicy()};
 
-    cache.put(keyFor(allowedRequest), base, false);
+    cache.put(keyFor(allowedRequest), base, Decision::Deny);
 
     EXPECT_TRUE(PolicyEngine::evaluateCached(cache, policies, allowedRequest, Consistency::FullyConsistent));
 }
@@ -166,7 +166,7 @@ TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshSharesTheMinimizeLatencyBuc
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
     const std::vector<Policy> policies{allowDenyPolicy()};
 
-    cache.put(keyFor(allowedRequest), base, false);
+    cache.put(keyFor(allowedRequest), base, Decision::Deny);
 
     // Old token -> satisfied by the bucket -> reuses that very entry.
     EXPECT_FALSE(PolicyEngine::evaluateCached(
@@ -179,7 +179,7 @@ TEST_F(PolicyEngineTest, EvaluateCachedAtLeastAsFreshMissesWhenTokenIsFresherTha
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
     const std::vector<Policy> policies{allowDenyPolicy()};
 
-    cache.put(keyFor(allowedRequest), base, false);
+    cache.put(keyFor(allowedRequest), base, Decision::Deny);
 
     // Token newer than the bucket start -> different key -> real evaluation.
     EXPECT_TRUE(PolicyEngine::evaluateCached(
@@ -198,5 +198,5 @@ TEST_F(PolicyEngineTest, EvaluateCachedPopulatesTheCacheForTheNextCaller) {
     // Second call at the same bucket now hits rather than re-evaluating.
     const auto cached = cache.get(keyFor(allowedRequest), now);
     ASSERT_TRUE(cached.has_value());
-    EXPECT_TRUE(*cached);
+    EXPECT_EQ(*cached, Decision::Allow);
 }

@@ -51,10 +51,10 @@ TEST(DecisionCache, HitOnExactSnapshot) {
     auto now = bucketAlignedNow();
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
 
-    cache.put(kAlice, now, true);
+    cache.put(kAlice, now, Decision::Allow);
     const auto result = cache.get(kAlice, now);
     ASSERT_TRUE(result.has_value());
-    EXPECT_TRUE(*result);
+    EXPECT_EQ(*result, Decision::Allow);
 }
 
 TEST(DecisionCache, MissOnADifferentSnapshot) {
@@ -64,7 +64,7 @@ TEST(DecisionCache, MissOnADifferentSnapshot) {
     auto now = bucketAlignedNow();
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
 
-    cache.put(kAlice, now, true);
+    cache.put(kAlice, now, Decision::Allow);
     EXPECT_FALSE(cache.get(kAlice, now + kBucket).has_value());
 }
 
@@ -75,11 +75,11 @@ TEST(DecisionCache, SnapshotsCoexistForOneIdentity) {
     auto now = bucketAlignedNow();
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
 
-    cache.put(kAlice, now, true);
-    cache.put(kAlice, now + kBucket, false);
+    cache.put(kAlice, now, Decision::Allow);
+    cache.put(kAlice, now + kBucket, Decision::Deny);
 
-    EXPECT_TRUE(*cache.get(kAlice, now));
-    EXPECT_FALSE(*cache.get(kAlice, now + kBucket));
+    EXPECT_EQ(*cache.get(kAlice, now), Decision::Allow);
+    EXPECT_EQ(*cache.get(kAlice, now + kBucket), Decision::Deny);
     EXPECT_EQ(cache.size(), 2u);
 }
 
@@ -91,7 +91,7 @@ TEST(DecisionCache, HitStaysValidLongAfterItWasComputed) {
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
     const Snapshot when = now;
 
-    cache.put(kAlice, when, true);
+    cache.put(kAlice, when, Decision::Allow);
     now += kTtl * 100; // absurdly far past the retention window
 
     EXPECT_TRUE(cache.get(kAlice, when).has_value());
@@ -101,11 +101,11 @@ TEST(DecisionCache, DifferentIdentitiesDoNotCollide) {
     auto now = bucketAlignedNow();
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
 
-    cache.put(CacheKey{"alice", "db:read", "urn:table:users"}, now, true);
-    cache.put(CacheKey{"alice", "db:delete", "urn:table:users"}, now, false);
+    cache.put(CacheKey{"alice", "db:read", "urn:table:users"}, now, Decision::Allow);
+    cache.put(CacheKey{"alice", "db:delete", "urn:table:users"}, now, Decision::Deny);
 
-    EXPECT_TRUE(*cache.get(CacheKey{"alice", "db:read", "urn:table:users"}, now));
-    EXPECT_FALSE(*cache.get(CacheKey{"alice", "db:delete", "urn:table:users"}, now));
+    EXPECT_EQ(*cache.get(CacheKey{"alice", "db:read", "urn:table:users"}, now), Decision::Allow);
+    EXPECT_EQ(*cache.get(CacheKey{"alice", "db:delete", "urn:table:users"}, now), Decision::Deny);
 }
 
 TEST(DecisionCache, EvictsSnapshotsOlderThanTtl) {
@@ -113,12 +113,12 @@ TEST(DecisionCache, EvictsSnapshotsOlderThanTtl) {
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
     const Snapshot old = now;
 
-    cache.put(kAlice, old, true);
+    cache.put(kAlice, old, Decision::Allow);
     ASSERT_TRUE(cache.get(kAlice, old).has_value());
 
     // Writing a fresh snapshot is what triggers the sweep for this identity.
     now += kTtl + kBucket;
-    cache.put(kAlice, now, false);
+    cache.put(kAlice, now, Decision::Deny);
 
     EXPECT_FALSE(cache.get(kAlice, old).has_value()); // reclaimed for capacity
     EXPECT_TRUE(cache.get(kAlice, now).has_value());  // still retained
@@ -130,9 +130,9 @@ TEST(DecisionCache, RetainsSnapshotsWithinTtl) {
     DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
     const Snapshot recent = now;
 
-    cache.put(kAlice, recent, true);
+    cache.put(kAlice, recent, Decision::Allow);
     now += kBucket; // comfortably inside the retention window
-    cache.put(kAlice, now, false);
+    cache.put(kAlice, now, Decision::Deny);
 
     EXPECT_TRUE(cache.get(kAlice, recent).has_value());
     EXPECT_EQ(cache.size(), 2u);

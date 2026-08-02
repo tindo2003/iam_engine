@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 #include "iam/engine.hpp"
@@ -28,6 +29,13 @@ std::vector<RoleName> sorted(std::vector<RoleName> names) {
 }
 
 const Request kRead{"alice", "db:read", "urn:table:users"};
+
+constexpr std::chrono::milliseconds kTtl{5000};
+constexpr std::chrono::milliseconds kBucket{1000};
+
+Snapshot bucketAlignedNow() {
+    return quantize(std::chrono::steady_clock::now(), kBucket);
+}
 
 } // namespace
 
@@ -201,4 +209,129 @@ TEST(EvaluateRbac, DeniedWhenEveryRoleIsUndecided) {
     graph.assign("alice", "engineer");
 
     EXPECT_FALSE(PolicyEngine::evaluateRbac(graph, kRead));
+}
+
+// --- Layer 2: the subproblem cache -------------------------------------
+
+TEST(SubproblemCache, StoresOneEntryKeyedOnTheRole) {
+    auto now = bucketAlignedNow();
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+
+    EXPECT_EQ(PolicyEngine::evaluateForRoleCached(subproblemCache, graph, "engineer", kRead),
+              Decision::Allow);
+    EXPECT_EQ(subproblemCache.size(), 1u);
+}
+
+TEST(SubproblemCache, TwoPrincipalsShareOneRoleEntry) {
+    // THE point of the whole layer: bob reuses the work alice's check did,
+    // even though their top-level requests are different.
+    auto now = bucketAlignedNow();
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+
+    const Request asAlice{"alice", "db:read", "urn:table:users"};
+    const Request asBob{"bob", "db:read", "urn:table:users"};
+
+    PolicyEngine::evaluateForRoleCached(subproblemCache, graph, "engineer", asAlice);
+    ASSERT_EQ(subproblemCache.size(), 1u);
+
+    PolicyEngine::evaluateForRoleCached(subproblemCache, graph, "engineer", asBob);
+    EXPECT_EQ(subproblemCache.size(), 1u); // still one -- keyed on role, not principal
+}
+
+TEST(SubproblemCache, ReadsFromTheCacheRatherThanReevaluating) {
+    auto now = bucketAlignedNow();
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+
+    // Poison: the real answer is Allow, so getting Deny back proves the
+    // cached value was used instead of a fresh evaluation.
+    subproblemCache.put(CacheKey{"engineer", "db:read", "urn:table:users"}, now, Decision::Deny);
+
+    EXPECT_EQ(PolicyEngine::evaluateForRoleCached(subproblemCache, graph, "engineer", kRead),
+              Decision::Deny);
+}
+
+TEST(SubproblemCache, CachedUndecidedIsAnAnswerNotAMiss) {
+    // A role that matched nothing must stay cached as Undecided. Collapse
+    // it into a miss and a known-empty role is re-evaluated forever.
+    auto now = bucketAlignedNow();
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:write", "urn:table:orders")}, {}});
+
+    EXPECT_EQ(PolicyEngine::evaluateForRoleCached(subproblemCache, graph, "engineer", kRead),
+              Decision::Undecided);
+    EXPECT_EQ(subproblemCache.size(), 1u); // stored, not skipped
+
+    const auto cached = subproblemCache.get(CacheKey{"engineer", "db:read", "urn:table:users"}, now);
+    ASSERT_TRUE(cached.has_value());
+    EXPECT_EQ(*cached, Decision::Undecided);
+}
+
+// --- Both layers together ----------------------------------------------
+
+TEST(RbacCached, PopulatesBothLayers) {
+    auto now = bucketAlignedNow();
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "engineer");
+
+    EXPECT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
+    EXPECT_EQ(checkCache.size(), 1u); // alice's whole-check answer
+    EXPECT_EQ(subproblemCache.size(), 1u);  // the engineer subproblem
+}
+
+TEST(RbacCached, SecondPrincipalReusesTheRoleWork) {
+    auto now = bucketAlignedNow();
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "engineer");
+    graph.assign("bob", "engineer");
+
+    PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph,
+                                     Request{"alice", "db:read", "urn:table:users"});
+    PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph,
+                                     Request{"bob", "db:read", "urn:table:users"});
+
+    EXPECT_EQ(checkCache.size(), 2u); // two distinct principals, two answers
+    EXPECT_EQ(subproblemCache.size(), 1u);  // but only ONE role evaluation between them
+}
+
+TEST(RbacCached, RepeatRequestHitsTheWholeCheckLayer) {
+    auto now = bucketAlignedNow();
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "engineer");
+
+    // Poison layer 1 only. If it is consulted first, the role layer is
+    // never reached and stays empty.
+    checkCache.put(CacheKey{"alice", "db:read", "urn:table:users"}, now, Decision::Deny);
+
+    EXPECT_FALSE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
+    EXPECT_EQ(subproblemCache.size(), 0u);
+}
+
+TEST(RbacCached, StillHonoursDenyAcrossRoles) {
+    // The combining rules must not change just because layers were added.
+    auto now = bucketAlignedNow();
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+    graph.addRole(Role{"suspended", {deny("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "engineer");
+    graph.assign("alice", "suspended");
+
+    EXPECT_FALSE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
 }

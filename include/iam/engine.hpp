@@ -44,24 +44,12 @@ namespace iam {
 // day, department, MFA state). Condition blocks are what would create
 // the need, and they are not built.
 
-// What one role says about a request, on its own.
-//
-// This has to be three-valued, and that is the one genuinely non-obvious
-// part of the RBAC design. evaluate() can collapse to bool because
-// default-deny applies once, globally, at the very end. A single role
-// cannot: "this role denies" and "this role has nothing to say" are
-// different facts, because a Deny anywhere in the effective role set has
-// to beat an Allow from any other role. Collapse Undecided into Deny too
-// early and every role silently vetoes every other role.
-enum class Decision {
-    Allow,
-    Deny,
-    Undecided, // no statement in this role matched the request at all
-};
+// Decision now lives in types.hpp, so that DecisionCache can store one
+// without cache.hpp having to include this header.
 
 // How a cached lookup actually works here
 // ---------------------------------------
-// The cache is shaped `identity -> {snapshot -> bool}`. Critically, a
+// A cache is shaped `subject -> {snapshot -> Decision}`. Critically, a
 // lookup NEVER searches that inner map for a "close enough" snapshot.
 // Every consistency level computes exactly one snapshot value first,
 // then does a plain find() -- hit or miss, nothing in between:
@@ -151,6 +139,30 @@ public:
     // Full RBAC check: resolve the principal's effective roles, ask each
     // one, then combine.
     static bool evaluateRbac(const RoleGraph& graph, const Request& request);
+
+    // --- The two cache layers -------------------------------------------
+    //
+    // Layer 2 (subproblem). Keyed on the ROLE, not the principal, so every
+    // holder of that role shares one entry: alice's check warms the cache
+    // for bob. `subproblemCache` must be a different instance from the
+    // whole-check cache -- that separation is what keeps a role named
+    // "alice" from colliding with a principal named "alice".
+    static Decision evaluateForRoleCached(DecisionCache& subproblemCache,
+                                            const RoleGraph& graph,
+                                            const RoleName& role,
+                                            const Request& request,
+                                            Consistency consistency = Consistency::MinimizeLatency,
+                                            Snapshot minSnapshot = Snapshot{});
+
+    // Both layers together. Layer 1 (`checkCache`) short-circuits an
+    // identical repeat request; on a miss, layer 2 (`subproblemCache`) still
+    // lets this check reuse per-role work done for other principals.
+    static bool evaluateRbacCached(DecisionCache& checkCache,
+                                    DecisionCache& subproblemCache,
+                                    const RoleGraph& graph,
+                                    const Request& request,
+                                    Consistency consistency = Consistency::MinimizeLatency,
+                                    Snapshot minSnapshot = Snapshot{});
 };
 
 } // namespace iam

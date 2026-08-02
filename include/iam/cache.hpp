@@ -7,13 +7,22 @@
 #include <string>
 #include <unordered_map>
 
+#include "iam/types.hpp"
+
 namespace iam {
 
-// The identity being checked. Note this does NOT include the snapshot --
-// see DecisionCache below for why the snapshot is a second, nested level
+// What was evaluated. Note this does NOT include the snapshot -- see
+// DecisionCache below for why the snapshot is a second, nested level
 // rather than a fourth field here.
+//
+// `subject` is deliberately not called `principal`: the same key type
+// serves both cache layers. In the whole-check cache it holds a principal
+// ("alice"); in the subproblem cache it holds a role name ("engineer").
+// Those two namespaces are kept apart by using two separate DecisionCache
+// instances, not by anything in the key -- so a role named "alice" can
+// never be confused with a principal named "alice".
 struct CacheKey {
-    std::string principal;
+    std::string subject;
     std::string action;
     std::string resource;
 
@@ -72,9 +81,15 @@ public:
     // answer computed at snapshot S is correct for S permanently, so a
     // matching key is always a valid hit no matter how much wall-clock
     // time has passed.
-    std::optional<bool> get(const CacheKey& key, Snapshot snapshot) const;
+    //
+    // The optional and the Decision answer different questions, and both
+    // are needed: nullopt means "not cached", while a cached
+    // Decision::Undecided means "cached, and the answer is that nothing
+    // matched". Collapsing the latter into a miss would re-evaluate a
+    // known-empty role on every request.
+    std::optional<Decision> get(const CacheKey& key, Snapshot snapshot) const;
 
-    void put(const CacheKey& key, Snapshot snapshot, bool decision);
+    void put(const CacheKey& key, Snapshot snapshot, Decision decision);
 
     Snapshot now() const;
     std::chrono::milliseconds bucketSize() const;
@@ -90,12 +105,12 @@ private:
     // is never swept again, so its entries leak until the process exits.
     // A production cache needs a background sweep or a global LRU -- both
     // are their own topic, out of scope here.
-    void evict(std::map<Snapshot, bool>& snapshots);
+    void evict(std::map<Snapshot, Decision>& snapshots);
 
     std::chrono::milliseconds ttl_;
     Clock clock_;
     std::chrono::milliseconds bucket_;
-    std::unordered_map<CacheKey, std::map<Snapshot, bool>, CacheKeyHash> entries_;
+    std::unordered_map<CacheKey, std::map<Snapshot, Decision>, CacheKeyHash> entries_;
 };
 
 } // namespace iam
