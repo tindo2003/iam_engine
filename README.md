@@ -13,6 +13,18 @@ cmake --build build
 ./build/iam_demo
 ```
 
+`iam_demo` walks through the assembled system via `AuthorizationService` --
+role inheritance, both cache layers, a mid-bucket revocation taking effect
+immediately, and the cache stats behind each step.
+
+Other runnable targets:
+
+| target | what it shows |
+|---|---|
+| `cache_bench` | the benchmarks below |
+| `snapshot_race_demo` | why a multi-read check needs one pinned snapshot |
+| `pointer_escapes_lock` | why returning a pointer from a locked function is a race |
+
 ## Test
 
 ```

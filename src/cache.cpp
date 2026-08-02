@@ -46,24 +46,30 @@ size_t DecisionCache::FlightKeyHash::operator()(const FlightKey& flight) const {
 
 std::optional<Decision> DecisionCache::get(const CacheKey& key, Snapshot snapshot) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    return getUnlocked(key, snapshot);
+    const std::optional<Decision> found = getUnlocked(key, snapshot);
+
+    // Counted here rather than in getUnlocked, because getOrCompute calls
+    // both -- once on its fast path and again to re-check under the
+    // exclusive lock. Counting in the helper tallied every miss twice.
+    if (found.has_value()) {
+        ++hits_;
+    } else {
+        ++misses_;
+    }
+    return found;
 }
 
 std::optional<Decision> DecisionCache::getUnlocked(const CacheKey& key, Snapshot snapshot) const {
     auto it = entries_.find(key);
     if (it == entries_.end()) {
-        ++misses_;
         return std::nullopt;
     }
 
     const auto& snapshots = it->second;
     auto snapIt = snapshots.find(snapshot);
     if (snapIt == snapshots.end()) {
-        ++misses_; // this identity has been checked, but not at this snapshot
-        return std::nullopt;
+        return std::nullopt; // this identity has been checked, but not at this snapshot
     }
-
-    ++hits_;
     return snapIt->second;
 }
 
