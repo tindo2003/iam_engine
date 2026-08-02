@@ -34,6 +34,11 @@ find_package(Threads REQUIRED)
 add_executable(snapshot_race_demo demos/snapshot_consistency_race.cpp)
 target_link_libraries(snapshot_race_demo PRIVATE Threads::Threads)
 
+# Standalone illustration of the RoleGraph::find() race, see
+# experimental/pointer_escapes_lock.cpp. Depends on nothing in iam_core.
+add_executable(pointer_escapes_lock experimental/pointer_escapes_lock.cpp)
+target_link_libraries(pointer_escapes_lock PRIVATE Threads::Threads)
+
 # Benchmarks. Release-mode by default -- measuring a debug build tells you
 # very little about a cache.
 add_executable(cache_bench bench/cache_bench.cpp)
