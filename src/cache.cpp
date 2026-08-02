@@ -99,10 +99,22 @@ Decision DecisionCache::getOrCompute(const CacheKey& key, Snapshot snapshot, con
     std::shared_ptr<std::promise<Decision>> owned;
 
     {
+        // EXCLUSIVE, even though this block starts by reading. This is the
+        // one place the shared/unique split is not mechanical, so it is
+        // worth spelling out.
+        //
+        // Registering a flight is a read-then-write on inFlight_, and the
+        // two halves have to be atomic with respect to each other. Under a
+        // shared lock, two threads could inspect inFlight_ at the same
+        // instant, both find nothing in progress, and both register
+        // themselves as the owner -- reintroducing precisely the duplicate
+        // computation this function exists to eliminate.
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
-        // Re-check under the exclusive lock: between the fast path above
-        // and here, somebody may have finished and stored the answer.
+        // Re-check the cache under that exclusive lock. Between the fast
+        // path at the top of this function and here, another thread may
+        // have finished its flight and stored the answer, in which case
+        // there is nothing left to coordinate.
         if (std::optional<Decision> cached = getUnlocked(key, snapshot)) {
             return *cached;
         }

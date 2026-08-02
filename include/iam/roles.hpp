@@ -93,6 +93,18 @@ private:
     std::vector<RoleName> effectiveRolesUnlocked(const std::string& principal) const;
     const Role* findUnlocked(const RoleName& name) const;
 
+    // Guards every member below. `mutable` so const reads can lock;
+    // shared_mutex because checks read constantly and only administration
+    // writes, so readers must not queue behind each other.
+    //
+    // Locking discipline:
+    //   shared   find(), effectiveRoles(), revision()
+    //   unique   addRole(), assign()
+    //
+    // effectiveRoles() holds its shared lock across the WHOLE traversal
+    // rather than re-taking it per node -- see the comment on its
+    // definition. That is what the *Unlocked helpers above are for, and
+    // they must only be called with this already held.
     mutable std::shared_mutex mutex_;
     Clock clock_;
     Snapshot revision_{};

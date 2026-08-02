@@ -65,10 +65,22 @@ const Role* RoleGraph::findUnlocked(const RoleName& name) const {
 }
 
 std::vector<RoleName> RoleGraph::effectiveRoles(const std::string& principal) const {
-    // One shared lock for the whole traversal, not one per node lookup --
-    // otherwise a concurrent write could land mid-walk and the result
-    // would mix pre- and post-write state. Exactly the bug
-    // demos/snapshot_consistency_race.cpp reproduces.
+    // ONE shared lock, held across the entire traversal -- not one per
+    // node lookup. This is why the *Unlocked helpers exist at all: the
+    // public methods lock and delegate, and the walk below calls the
+    // unlocked variants.
+    //
+    // Two reasons, and the second is the one that matters.
+    //
+    //   1. std::shared_mutex is not recursive, so re-acquiring it on
+    //      every node would deadlock against ourselves.
+    //
+    //   2. Releasing between node lookups would let a write land
+    //      mid-walk, so the returned role set could mix pre- and
+    //      post-write state -- a set this graph never actually held at
+    //      any single instant. That is exactly the bug reproduced in
+    //      demos/snapshot_consistency_race.cpp, and exactly what a
+    //      snapshot timestamp buys Zanzibar (lesson 0007).
     std::shared_lock<std::shared_mutex> lock(mutex_);
     return effectiveRolesUnlocked(principal);
 }

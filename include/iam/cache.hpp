@@ -160,8 +160,27 @@ private:
     mutable std::atomic<size_t> misses_{0};
     mutable std::atomic<size_t> coalesced_{0};
 
+    // Guards entries_ AND inFlight_ together. One lock rather than two
+    // because getOrCompute has to consult both atomically: "is it cached,
+    // and if not is somebody already computing it" must be answered as a
+    // single question, or two threads can both decide to compute.
+    //
+    // `mutable` so const reads (get, size) can lock. shared_mutex rather
+    // than mutex because reads vastly outnumber writes here.
+    //
+    // Locking discipline:
+    //   shared   get(), size()
+    //   unique   put(), and getOrCompute's flight registration/retirement
+    //   NONE     the compute callback -- deliberately, so a slow
+    //            evaluation never blocks unrelated readers
+    //
+    // Anything named *Unlocked assumes the caller already holds this.
     mutable std::shared_mutex mutex_;
     std::unordered_map<CacheKey, std::map<Snapshot, Decision>, CacheKeyHash> entries_;
+
+    // Who is currently computing what. An entry lives here only for the
+    // duration of one flight; owners erase it on completion, including on
+    // the exception path.
     std::unordered_map<FlightKey, std::shared_future<Decision>, FlightKeyHash> inFlight_;
 };
 
