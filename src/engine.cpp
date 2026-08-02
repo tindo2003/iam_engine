@@ -110,34 +110,39 @@ Decision PolicyEngine::evaluateForRole(const RoleGraph& graph,
 }
 
 bool PolicyEngine::evaluateRbac(const RoleGraph& graph, const Request& request) {
-    // TODO: combine the subproblems.
+    // Resolves the principal to their effective roles (direct plus
+    // everything inherited), asks each role independently, then combines:
     //
-    //   1. roles = graph.effectiveRoles(request.principal)
-    //   2. Ask evaluateForRole() for each one.
-    //   3. Combine:
-    //        any Deny      -> false
-    //        else any Allow -> true
-    //        else           -> false   (default deny, applied once, globally)
+    //     any Deny       -> false
+    //     else any Allow -> true
+    //     else           -> false   (default deny, applied once, globally)
     //
-    // Careful, this is the trap: you cannot return true on the first
-    // Allow you see. A later role in the set may Deny, and Deny has to
-    // win -- same rule evaluate() already follows across policies, now
-    // across roles too. You may return false early on a Deny, since
-    // nothing can outrank it.
+    // Note the asymmetry in how the two outcomes are handled below: a Deny
+    // returns immediately because nothing can outrank it, but an Allow
+    // only sets a flag and keeps scanning, because a later role may still
+    // Deny. This is the same rule evaluate() follows across statements,
+    // now applied across roles.
+    //
+    // Collapsing Decision::Undecided into Deny here would be wrong for the
+    // same reason it is wrong inside evaluateForRole: a role that simply
+    // never mentions this resource must not veto a grant from another
+    // role. Undecided contributes nothing in either direction; global
+    // default-deny is what turns "nobody allowed it" into false, and it
+    // applies exactly once, at the end.
     std::vector<RoleName> roles = graph.effectiveRoles(request.principal);
     std::vector<Decision> decisions;
     for (const RoleName& role: roles) {
         decisions.push_back(evaluateForRole(graph, role, request));
     }
-    bool defaultDecision = false;
+    bool allowed = false;
     for (const Decision& decision: decisions) {
         if (decision == Decision::Deny) {
             return false;
         } else if (decision == Decision::Allow) {
-            defaultDecision = true;
+            allowed = true;
         }
     }
-    return defaultDecision;
+    return allowed;
 }
 
 } // namespace iam

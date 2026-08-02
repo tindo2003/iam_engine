@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lesson 6 — Caching the Subproblem</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 0006 · iam-engine teaching workspace</p>
+<h1>Caching the Subproblem</h1>
+<p class="sidenote">The payoff. Lessons 0001–0004 built a cache for whole checks; lesson 0005 built the roles that finally create something smaller to cache. This one puts them together — and the result is a genuinely different kind of caching than what you have today.</p>
+
+<h2>What your cache can and cannot share today</h2>
+<p>
+<code>evaluateCached</code> keys on <code>(principal, action, resource,
+snapshot)</code>. Ask yourself what that means for two colleagues:
+</p>
+<pre><code>alice: db:read on urn:table:users   -> key (alice, db:read, users, S)
+bob:   db:read on urn:table:users   -> key (bob,   db:read, users, S)</code></pre>
+<p>
+Two keys. Two full evaluations. And if both are engineers — if the work
+is <em>literally the same traversal over the same roles</em> — the cache
+has no way to notice, because the principal is baked into the key.
+</p>
+<p>
+Now recall the shape you gave <code>evaluateForRole</code> in lesson 0005:
+</p>
+<pre><code>static Decision evaluateForRole(const RoleGraph&amp;, const RoleName&amp;, const Request&amp;);
+//                                                  ^^^^^^^^ no principal</code></pre>
+<p>
+That omission was not an accident, and this lesson is what it was for.
+"Does <code>engineer</code> allow <code>db:read</code> on
+<code>urn:table:users</code>?" has one answer, shared by every engineer in
+the company. Cache <em>that</em>, and alice's check warms the cache for
+bob — and for everyone hired next year.
+</p>
+
+<div class="callout">
+<div class="callout-title">Two caches, not one</div>
+<p>
+This does not replace <code>DecisionCache</code>. Real systems run both
+layers: a whole-check cache that turns a repeat of the <em>exact same
+request</em> into one lookup, and a subproblem cache underneath that
+shares work between <em>different</em> requests. The second is what
+actually scales, because hot roles (<code>employee</code>, an org's base
+role) get hit by nearly every check in the system.
+</p>
+</div>
+
+<h2>The key</h2>
+<p>
+<code>(role, action, resource, snapshot)</code>. Note what changed and
+what did not: <code>principal</code> is gone, everything else stays —
+including <code>snapshot</code>, for exactly the reasons lesson 0004
+established. A role's policies can be edited, so a per-role answer is
+snapshot-scoped just like a per-principal one.
+</p>
+<p>
+That means the whole machinery you already built transfers unchanged:
+<code>quantize()</code>, <code>selectSnapshot()</code>, eviction, the
+three consistency levels. You are not designing a new cache — you are
+reusing the one you have with a different key.
+</p>
+
+<p class="citation">
+Primary source: <a href="https://authzed.com/blog/how-caching-works-in-spicedb" target="_blank" rel="noopener">How Caching Works in SpiceDB</a> (AuthZed) — the decomposition section describes exactly this, one level deeper (their subproblems nest arbitrarily; yours are one level, which is plenty to see the effect).
+</p>
+
+<h2>Check your understanding</h2>
+
+<div class="quiz" data-answer="b"
+     data-feedback-correct="Right. The whole-check cache only helps when the identical request repeats; the subproblem cache lets two different requests share the work underneath them."
+     data-feedback-incorrect="Not quite -- reread 'What your cache can and cannot share today'. Both requests are distinct at the top level, so ask which layer can see that they overlap underneath.">
+  <p class="quiz-question">Alice and Bob are both engineers. Alice's check runs first, then Bob's identical-except-for-principal check. What does the subproblem cache add that the whole-check cache cannot?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">It stores both answers under a shorter key</button>
+    <button class="quiz-option" data-key="b">Bob reuses the role work Alice already did</button>
+    <button class="quiz-option" data-key="c">Bob skips resolving his own role membership</button>
+    <button class="quiz-option" data-key="d">Alice and Bob share a single eviction window</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="c"
+     data-feedback-correct="Correct. Role policies are editable, so a per-role answer is scoped to a point in time for exactly the same reason a per-principal one is."
+     data-feedback-incorrect="Not quite. Ask what happens if someone edits the engineer role's policies -- would an answer computed before that edit still be correct afterwards?">
+  <p class="quiz-question">Why does the subproblem key keep <code>snapshot</code> even though it drops <code>principal</code>?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">Because eviction needs an ordered map key</button>
+    <button class="quiz-option" data-key="b">Because role names can be reused over time</button>
+    <button class="quiz-option" data-key="c">Because a role's policies can be edited later</button>
+    <button class="quiz-option" data-key="d">Because principals change roles more often</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<h2>Build it into iam-engine</h2>
+<p>
+Smaller than it sounds — most of the work is already done, and this is
+mostly about reusing it.
+</p>
+<ol>
+<li><strong>Generalise the cache key.</strong> <code>CacheKey</code> is
+currently <code>{principal, action, resource}</code>. A subproblem key is
+<code>{role, action, resource}</code> — structurally identical, different
+meaning. Decide deliberately: rename the field to something neutral
+(<code>subject</code>?), add a discriminator so a role named
+<code>"alice"</code> can never collide with a principal named
+<code>"alice"</code>, or use a second cache instance. Each is defensible;
+the collision question is the one that actually matters.</li>
+<li><strong>Add a cached wrapper</strong> alongside
+<code>evaluateForRole</code>, taking a <code>DecisionCache&amp;</code>
+plus consistency and token, exactly mirroring <code>evaluateCached</code>'s
+signature. Reuse <code>selectSnapshot()</code> verbatim.</li>
+<li><strong>Watch out:</strong> <code>DecisionCache</code> stores
+<code>bool</code>, but a subproblem answer is a three-valued
+<code>Decision</code>. Collapsing it to bool reintroduces the exact bug
+lesson 0005 warned about. You will need to widen what the cache stores —
+or store two bools, or a small enum. Your call, but do not lose
+<code>Undecided</code>.</li>
+<li><strong>Then prove it actually shares.</strong> This is the test that
+matters, and it is worth writing before the code: give two principals the
+same role, run a full check for each, and assert the second one did not
+re-evaluate. <code>cache.size()</code> after both should show one
+subproblem entry, not two.</li>
+</ol>
+
+<p class="ask-teacher">
+Step 3 is the one with a real decision in it — how to store a tri-state
+in a cache built for bools. Ask before you pick, if the tradeoffs are not
+obvious; getting it wrong reintroduces a bug you have already fixed once.
+</p>
+
+<nav class="lesson-nav">
+  <span><a href="../lessons/0005-roles-and-subproblems.html">&larr; Lesson 0005</a></span>
+  <span>Next: Lesson 0007 (not yet written)</span>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
