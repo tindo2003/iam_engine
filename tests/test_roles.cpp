@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <memory>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "iam/roles.hpp"
@@ -115,4 +119,74 @@ TEST(RoleGraph, RevisionAdvancesEvenWhenTheClockDoesNot) {
     graph.addRole(Role{"b", {}, {}});
 
     EXPECT_GT(graph.revision(), afterFirstWrite);
+}
+
+// --- Concurrency --------------------------------------------------------
+
+TEST(RoleGraph, AFoundRoleSurvivesAConcurrentOverwrite) {
+    // find() used to return `const Role*` into roles_, but the lock is
+    // released when it returns -- so addRole() overwriting the same name
+    // mutated the object out from under the caller. ThreadSanitizer
+    // reported it as a real data race.
+    //
+    // Roles are now immutable and shared: a write installs a NEW pointer,
+    // so a reader's snapshot stays valid and unchanged. Run this file
+    // under TSan to actually exercise the guarantee; without it this is
+    // only a smoke test.
+    RoleGraph graph;
+    graph.addRole(Role{"engineer", {}, {"base"}});
+
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> observed{0};
+
+    std::thread reader([&] {
+        while (!stop.load()) {
+            if (std::shared_ptr<const Role> role = graph.find("engineer")) {
+                // Dereferenced well after find()'s lock was released.
+                const size_t inherited = role->inherits.size();
+                EXPECT_TRUE(inherited == 1 || inherited == 2);
+                ++observed;
+            }
+        }
+    });
+
+    for (int i = 0; i < 2000; ++i) {
+        graph.addRole(Role{"engineer", {}, {"base", "extra"}});
+        graph.addRole(Role{"engineer", {}, {"base"}});
+    }
+    stop.store(true);
+    reader.join();
+
+    EXPECT_GT(observed.load(), 0u); // the reader really did run
+}
+
+TEST(RoleGraph, ConcurrentReadersSeeAWholeRoleSetNotAHalfWrittenOne) {
+    // effectiveRoles holds one lock across the whole traversal, so a
+    // concurrent write cannot land mid-walk and produce a set that mixes
+    // pre- and post-write state.
+    RoleGraph graph;
+    graph.addRole(Role{"base", {}, {}});
+    graph.addRole(Role{"engineer", {}, {"base"}});
+    graph.assign("alice", "engineer");
+
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 4; ++t) {
+        readers.emplace_back([&] {
+            while (!stop.load()) {
+                for (const RoleName& name : graph.effectiveRoles("alice")) {
+                    // Every name must be one that actually exists.
+                    EXPECT_TRUE(graph.find(name) != nullptr) << "unknown role: " << name;
+                }
+            }
+        });
+    }
+
+    for (int i = 0; i < 1000; ++i) {
+        graph.addRole(Role{"extra" + std::to_string(i), {}, {}});
+    }
+    stop.store(true);
+    for (std::thread& t : readers) {
+        t.join();
+    }
 }

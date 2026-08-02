@@ -125,7 +125,9 @@ Decision PolicyEngine::evaluateForRole(const RoleGraph& graph,
     // Reads only this role's OWN policies -- `inherits` is evaluateRbac's
     // job. Tri-state because "denies" and "has nothing to say" must stay
     // distinguishable; see the note on Decision in engine.hpp.
-    const Role* found = graph.find(role);
+    // Holding the shared_ptr keeps this Role alive and unchanged for the
+    // whole evaluation, even if another thread replaces it mid-way.
+    const std::shared_ptr<const Role> found = graph.find(role);
     if (found == nullptr) {
         return Decision::Undecided; // no such role: says nothing, denies nothing
     }

@@ -36,7 +36,11 @@ Snapshot stampWrite(Snapshot previous, Snapshot now) {
 
 void RoleGraph::addRole(Role role) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    roles_[role.name] = role;
+    // Install a NEW immutable Role rather than assigning over the old
+    // one. Readers holding the previous shared_ptr keep it alive and
+    // unchanged; overwriting in place would mutate it underneath them.
+    RoleName name = role.name; // copy the key before the value is moved
+    roles_[std::move(name)] = std::make_shared<const Role>(std::move(role));
     revision_ = stampWrite(revision_, clock_());
 }
 
@@ -51,15 +55,19 @@ Snapshot RoleGraph::revision() const {
     return revision_;
 }
 
-const Role* RoleGraph::find(const RoleName& name) const {
+std::shared_ptr<const Role> RoleGraph::find(const RoleName& name) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     return findUnlocked(name);
 }
 
-const Role* RoleGraph::findUnlocked(const RoleName& name) const {
+std::shared_ptr<const Role> RoleGraph::findUnlocked(const RoleName& name) const {
     auto it = roles_.find(name);
     if (it != roles_.end()) {
-        return &it->second;
+        // Copies the shared_ptr, not the Role. The caller's snapshot stays
+        // valid even after the lock is released and a writer replaces this
+        // entry, because a write installs a NEW pointer rather than
+        // mutating the one already handed out.
+        return it->second;
     }
     return nullptr;
 }
@@ -109,7 +117,8 @@ std::vector<RoleName> RoleGraph::effectiveRolesUnlocked(const std::string& princ
         for (const RoleName& role : curRoles) {
             ans.push_back(role);
 
-            const Role* found = findUnlocked(role); // already holding the lock
+            const std::shared_ptr<const Role> found =
+                findUnlocked(role); // already holding the lock
             if (found == nullptr) {
                 continue; // an assignment may name a role nobody defined
             }

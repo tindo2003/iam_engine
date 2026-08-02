@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -73,7 +74,19 @@ public:
     void assign(const std::string& principal, const RoleName& role);
 
     // Null when no such role has been added.
-    const Role* find(const RoleName& name) const;
+    //
+    // Returns a shared_ptr, NOT a raw pointer, and that is a correctness
+    // requirement rather than a style choice. A `const Role*` would point
+    // into roles_, but the lock is released the moment find() returns --
+    // so a concurrent addRole() overwriting that same name would mutate
+    // the object out from under the caller. Confirmed as a real data race
+    // under ThreadSanitizer before this was changed.
+    //
+    // Stored Roles are immutable once created; a write installs a NEW
+    // shared_ptr rather than modifying the old one, so any reader holding
+    // the previous pointer keeps a consistent snapshot for as long as it
+    // needs it. Copy-on-write, in other words.
+    std::shared_ptr<const Role> find(const RoleName& name) const;
 
     // Every role this principal effectively holds: their direct
     // assignments plus everything reachable through `inherits`.
@@ -91,7 +104,7 @@ public:
 private:
     // Transitive closure with no locking, for callers already holding one.
     std::vector<RoleName> effectiveRolesUnlocked(const std::string& principal) const;
-    const Role* findUnlocked(const RoleName& name) const;
+    std::shared_ptr<const Role> findUnlocked(const RoleName& name) const;
 
     // Guards every member below. `mutable` so const reads can lock;
     // shared_mutex because checks read constantly and only administration
@@ -108,7 +121,10 @@ private:
     mutable std::shared_mutex mutex_;
     Clock clock_;
     Snapshot revision_{};
-    std::unordered_map<RoleName, Role> roles_;
+    // Values are immutable and shared: writers replace the pointer,
+    // never the pointee, so readers that already took a copy are
+    // unaffected by a concurrent write.
+    std::unordered_map<RoleName, std::shared_ptr<const Role>> roles_;
     std::unordered_map<std::string, std::vector<RoleName>> assignments_;
 };
 
