@@ -95,6 +95,50 @@ systems deliberately cache denies longer or more aggressively than
 allows for exactly this reason.
 </p>
 
+<h3>Singleflight (request coalescing)</h3>
+<p>
+Running a missing key's computation <strong>at most once</strong> across
+all threads asking for it: the first caller registers an in-flight entry
+and computes, later arrivals wait on its result. Distinct from thread
+safety, and the distinction is the point — a mutex protects the
+<em>container</em>, so N concurrent misses still run N full evaluations
+and store N identical answers. Correct, and N times the work.
+</p>
+<p>
+Three details that are load-bearing rather than decorative: compute runs
+with <strong>no lock held</strong> (else a slow evaluation blocks every
+unrelated reader); registration takes an <strong>exclusive</strong> lock
+and re-checks the cache under it (under a shared lock two threads could
+both find no flight and both register one); and a throwing compute must
+<strong>retire its flight before rethrowing</strong>, or every waiter
+blocks forever on a promise nobody will fulfil.
+</p>
+<p>
+Deduplicates within one process only. Ten processes behind a load
+balancer still compute a key ten times — that is what consistent hashing
+addresses.
+</p>
+
+<h3>shared_mutex vs mutex</h3>
+<p>
+Authorization data is read constantly and written rarely, so readers
+should not queue behind each other. <code>shared_lock</code> for reads,
+<code>unique_lock</code> for writes. One caveat worth internalising: a
+multi-step read (a graph traversal) needs <strong>one lock across the
+whole walk</strong>, not one per lookup — otherwise a write lands
+mid-traversal and the result mixes pre- and post-write state, describing
+a world that never existed.
+</p>
+
+<h3>Verifying concurrency work</h3>
+<p>
+Passing tests are weak evidence; a race can hide for a thousand runs.
+Build under ThreadSanitizer. <strong>Then validate the sanitizer
+itself</strong> against a deliberately racy program — an uninstrumented
+TSan and a genuinely clean one both report nothing, and they look
+identical. Evidence of absence is only evidence if the detector works.
+</p>
+
 <h3>Policy indexing</h3>
 <p>
 Scanning every statement on every request (what

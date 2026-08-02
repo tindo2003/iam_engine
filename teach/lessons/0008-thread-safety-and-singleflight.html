@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lesson 8 — Thread Safety Is Not Deduplication</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 0008 · iam-engine teaching workspace</p>
+<h1>Thread Safety Is Not Deduplication</h1>
+<p class="sidenote">Two separate problems that get conflated constantly. Fixing the first leaves the second completely untouched — and the second is the one that actually costs you at scale.</p>
+
+<h2>Where this started</h2>
+<p>
+Back in lesson 0004 you asked what happens when ten identical requests
+fire at once, and whether quantization prevented the redundant work. The
+answer at the time — recorded in
+<a href="../learning-records/0001-quantization-does-not-prevent-redundant-writes.md">learning record 0001</a>
+— was no: quantization makes concurrent writes <em>agree</em>, it does not
+stop them <em>happening</em>. This lesson is the follow-through.
+</p>
+<p>
+It also had a prerequisite that was quietly broken the entire time.
+<code>DecisionCache::entries_</code> and <code>RoleGraph</code>'s maps were
+plain <code>unordered_map</code>s with no locking at all. Using them from
+two threads was not "slightly stale" — it was a <strong>data race</strong>,
+which is undefined behaviour. Not a wrong answer: no answer, no
+guarantees, anything at all.
+</p>
+
+<h2>Problem one: the containers</h2>
+<p>
+Both classes now hold a <code>std::shared_mutex</code>, not a plain one.
+That choice follows from the access pattern being lopsided: <em>every
+check reads; only administration writes</em>. A plain mutex would make
+readers queue behind each other for no reason. A shared mutex lets any
+number of readers proceed together and only excludes them for a write.
+</p>
+<pre><code>RoleGraph::addRole / assign        unique_lock   (writes)
+RoleGraph::find / effectiveRoles / revision
+                                   shared_lock   (reads)</code></pre>
+
+<div class="callout">
+<div class="callout-title">One lock for the whole traversal, not one per node</div>
+<p>
+<code>effectiveRoles</code> takes a single <code>shared_lock</code> and
+holds it across the entire breadth-first walk. That is why
+<code>findUnlocked</code> and <code>effectiveRolesUnlocked</code> exist —
+the public methods lock and delegate, the traversal uses the unlocked
+variants.
+</p>
+<p>
+Locking per node lookup instead would let a write land <em>between</em>
+two steps of the walk, producing a role set that mixes pre- and
+post-write state — a set the graph never actually held at any instant.
+That is precisely the bug
+<a href="../../demos/snapshot_consistency_race.cpp"><code>demos/snapshot_consistency_race.cpp</code></a>
+reproduces. When you built that demo it was illustrative, describing a
+problem <code>evaluate()</code> could not have. It is now the thing this
+lock is defending against.
+</p>
+</div>
+
+<h2>Problem two: the work</h2>
+<p>
+Here is the part that surprises people. Suppose ten threads ask for the
+same <em>uncached</em> key at the same instant, and the cache is fully
+thread-safe. What happens?
+</p>
+<p>
+All ten miss. All ten run the full evaluation. All ten store the
+identical answer. Nothing is corrupted, no invariant breaks, every caller
+gets the right result — and you did ten times the work. The mutex
+protects the <strong>container</strong>; it has nothing to say about the
+<strong>computation</strong>.
+</p>
+<p>
+That is the thundering herd, and it is worst exactly where it hurts most:
+a hot key that just expired, with every request in flight racing to
+recompute it.
+</p>
+
+<h2>Singleflight</h2>
+<p>
+<code>DecisionCache::getOrCompute</code> fixes it. The first caller for a
+key registers an in-flight entry and computes; everyone arriving while
+that is running waits on its result instead of starting their own.
+</p>
+<pre><code>fast path        cached? return it
+register         take exclusive lock
+                 re-check the cache
+                 either join an existing flight, or become its owner
+owner            compute WITHOUT the lock, store, fulfil, retire
+joiner           wait on the shared_future</code></pre>
+
+<h3>Three details that are not decoration</h3>
+<ul>
+<li><strong>Compute runs with no lock held.</strong> A policy evaluation
+is the slow part; holding the mutex across it would block every unrelated
+reader in the process on work they have no interest in.</li>
+
+<li><strong>The registration step takes an <em>exclusive</em> lock even
+though it begins by reading.</strong> It re-checks the cache under that
+lock, because another thread may have finished between the fast path and
+here. Doing the check under a shared lock would let two threads both
+conclude "nobody is computing this" and both register a flight —
+reintroducing the duplication this exists to remove.</li>
+
+<li><strong>A throwing compute retires its flight before rethrowing.</strong>
+Otherwise every waiter blocks forever on a promise nobody will ever
+fulfil. An exception in one thread would hang all the others.</li>
+</ul>
+
+<h2>Check your understanding</h2>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Right -- correct, and N times the work. The lock protects the map, not the computation, and those are different problems."
+     data-feedback-incorrect="Not quite -- reread 'Problem two'. The mutex guarantees the map survives concurrent access; ask whether it says anything at all about how many times compute() runs.">
+  <p class="quiz-question">Ten threads request the same uncached key simultaneously, against a cache that is thread-safe but has no singleflight. What happens?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">All ten compute; the map stays intact</button>
+    <button class="quiz-option" data-key="b">One computes; nine block on the mutex</button>
+    <button class="quiz-option" data-key="c">The map is corrupted by concurrent writes</button>
+    <button class="quiz-option" data-key="d">Nine threads receive a stale cached value</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Correct. Under a shared lock two threads can read the in-flight map at once, both find nothing, and both register -- which is the very duplication singleflight exists to prevent."
+     data-feedback-incorrect="Not quite. Ask what two threads could each conclude if they were allowed to inspect the in-flight map at the same moment.">
+  <p class="quiz-question">Why does <code>getOrCompute</code> take an <em>exclusive</em> lock to register a flight, when it starts by reading?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">Two threads could both register a flight</button>
+    <button class="quiz-option" data-key="b">Shared locks are slower than exclusive ones</button>
+    <button class="quiz-option" data-key="c">The compute callback needs exclusive access</button>
+    <button class="quiz-option" data-key="d">Eviction would run during every cache lookup</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Right -- the result would mix pre- and post-write state, describing a graph that never existed at any instant. Exactly what the snapshot-consistency demo reproduces."
+     data-feedback-incorrect="Not quite -- reread the callout. Think about what a concurrent writer could do in the gap between two node lookups if the lock were released between them.">
+  <p class="quiz-question">Why does <code>effectiveRoles</code> hold one lock across the whole traversal rather than locking each node lookup?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">A write could land between node lookups</button>
+    <button class="quiz-option" data-key="b">Re-locking each node would deadlock the traversal</button>
+    <button class="quiz-option" data-key="c">The visited set would need exclusive access</button>
+    <button class="quiz-option" data-key="d">Role names would be copied far more often</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<h2>Verify it yourself</h2>
+<p>
+Passing tests are weak evidence for concurrency work — a race can hide
+for a thousand runs. Build under ThreadSanitizer instead:
+</p>
+<pre><code>cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_CXX_FLAGS="-fsanitize=thread -g" \
+      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+cmake --build build-tsan
+./build-tsan/tests/test_cache</code></pre>
+
+<div class="callout">
+<div class="callout-title">Validate the tool before trusting its silence</div>
+<p>
+A sanitizer that silently failed to instrument reports zero races. So
+does a genuinely clean program. <strong>They look identical.</strong>
+</p>
+<p>
+Before believing a clean TSan run, compile a deliberately racy program
+with the same flags and confirm it <em>is</em> reported. Two unsynchronised
+threads incrementing a global is enough. That takes a minute and converts
+"no output" from ambiguous into meaningful.
+</p>
+<p>
+This is the same discipline as writing a test that fails before you fix
+the bug. Evidence of absence is only evidence if the detector works.
+</p>
+</div>
+
+<h2>What this does not solve</h2>
+<p>
+Singleflight deduplicates within <em>one process</em>. Ten processes
+behind a load balancer still compute the same key ten times, because
+neither the cache nor the in-flight map is shared between them. That is
+the consistent-hashing problem parked in
+<a href="../NOTES.md"><code>NOTES.md</code></a> — route a key to the same
+node every time and the deduplication becomes cluster-wide.
+</p>
+<p>
+Same shape as every other limit in this project: the mechanism is right,
+its authority is local.
+</p>
+
+<nav class="lesson-nav">
+  <span><a href="../lessons/0007-the-revision-floor.html">&larr; Lesson 0007</a></span>
+  <span>Reference: <a href="../reference/0001-iam-caching-glossary.html">IAM caching glossary</a></span>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
