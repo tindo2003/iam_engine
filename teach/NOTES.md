@@ -13,3 +13,10 @@
   it's about.
 - `disable-model-invocation: true` on the `teach` skill means I should never
   auto-trigger `/teach` myself; the user invokes it explicitly.
+- Lesson 0004 (hotspot caching) split into two fixes: quantization
+  (single-process, in scope, being built now) and consistent hashing
+  (multi-server dedup via a token hashring, deliberately deferred as
+  conceptual-only since `iam-engine` is single-process). **Revisit
+  consistent hashing as a future lesson** if the project ever grows a
+  distributed/multi-instance angle — until then it stays knowledge-only,
+  not a coding exercise.

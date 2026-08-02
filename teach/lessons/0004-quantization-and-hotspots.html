@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lesson 4 — Quantization and the Hotspot Problem</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 0004 · iam-engine teaching workspace</p>
+<h1>Quantization and the Hotspot Problem</h1>
+<p class="sidenote">Lessons 0001–0003 built a cache for <em>one</em> request at a time: TTL, then a version floor. This lesson is about what happens when the <em>same</em> request arrives thousands of times a second — the case the Zanzibar paper calls "the most critical frontier in our pursuit of low latency and high availability."</p>
+
+<h2>The hotspot problem</h2>
+<p>
+A hotspot is authorization data checked far more often than the rest —
+a viral post, a popular shared doc, an org's root folder. Your current
+<code>DecisionCache</code> handles this fine on a single process: the
+second identical request is a cache hit. The problem only shows up once
+you have more than one server.
+</p>
+<p>
+If each server in a cluster caches independently, a cluster of N servers
+with M bytes of cache each doesn't get you N×M bytes of useful caching —
+it gets you the same effective M/B unique problems as a single machine,
+just duplicated N times, because nothing guarantees two near-simultaneous
+identical requests land on the same server. Worse: even on <em>one</em>
+server, if two requests for the exact same thing arrive 50ms apart, the
+first one hasn't finished computing and caching its answer yet when the
+second one arrives — so without something forcing them together, both
+pay the full evaluation cost.
+</p>
+
+<h2>Fix 1: quantization (this lesson's build)</h2>
+<p>
+SpiceDB's default <code>minimize_latency</code> level doesn't stamp a
+cache entry with the exact instant it was computed. It rounds that
+timestamp down to a fixed window — e.g. the start of the current
+1-second bucket — before using it. Two requests 50ms apart, or 900ms
+apart, both round down to the <em>same</em> bucket boundary, so they
+naturally collapse onto the same effective freshness window instead of
+each starting its own independent TTL countdown from its own instant.
+</p>
+<p>
+This is a small change with an outsized effect: it's the difference
+between "N requests in a burst individually decide whether they're still
+fresh" and "N requests in a burst share one answer to that question."
+</p>
+
+<h2>Fix 2: consistent hashing (conceptual only — not built here)</h2>
+<p>
+Quantization alone doesn't fix the multi-server duplication problem —
+two different servers can each independently reach the right conclusion
+and still both do the work. SpiceDB's answer is a <strong>token
+hashring</strong>: consistent hashing routes the same problem to the
+same server(s) every time, so a cluster of N servers caches N×M/B unique
+items instead of just M/B. This only matters once there's more than one
+process, which is out of scope for a single-process `iam-engine` — worth
+understanding <em>why</em> it exists, not worth building here.
+</p>
+
+<p class="citation">
+Primary source for this lesson: <a href="https://authzed.com/blog/hotspot-caching-in-google-zanzibar-and-spicedb" target="_blank" rel="noopener">Hotspot Caching in Google Zanzibar and SpiceDB</a> (AuthZed).
+</p>
+
+<h2>Check your understanding</h2>
+
+<div class="quiz" data-answer="c"
+     data-feedback-correct="Right — duplication, not lack of caching, is the failure mode. Every server does the same work and stores the same answer redundantly."
+     data-feedback-incorrect="Not quite — each server DOES cache successfully on its own. The problem is that N servers independently caching the same popular item is N times the storage for one item's worth of benefit, not that caching fails outright.">
+  <p class="quiz-question">In a cluster of N servers, each caching independently with no coordination, why does a hotspot item NOT get N times the effective caching benefit?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">TTLs run out faster under concurrent load</button>
+    <button class="quiz-option" data-key="b">Popular items are excluded from local caches</button>
+    <button class="quiz-option" data-key="c">Every server redundantly caches the same answer</button>
+    <button class="quiz-option" data-key="d">Version floors reject most concurrent requests</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Correct. Quantization is purely about collapsing a burst of near-simultaneous requests onto one shared answer -- it doesn't touch what happens across separate servers."
+     data-feedback-incorrect="Not quite -- re-read 'Fix 1' above. Quantization rounds timestamps to shared buckets so requests close in time land on the same cache entry; it says nothing about which server handles a request.">
+  <p class="quiz-question">What does rounding a cache entry's timestamp down to a fixed bucket actually buy you?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">A burst of near-simultaneous requests shares one answer</button>
+    <button class="quiz-option" data-key="b">Requests are routed to the correct cluster server</button>
+    <button class="quiz-option" data-key="c">Stale entries are deleted the instant they expire</button>
+    <button class="quiz-option" data-key="d">Version floors no longer need to be checked at all</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<h2>Build it into iam-engine</h2>
+<p>Scoped steps, no full skeleton this time — you've done this shape twice already:</p>
+<ol>
+<li>Add a quantization window (e.g. <code>std::chrono::milliseconds bucketSize</code>) to <code>DecisionCache</code>, alongside <code>ttl_</code>.</li>
+<li>Write a private helper that rounds a <code>time_point</code> down to the start of its bucket — integer division on the duration since some fixed epoch is the usual trick: <code>floor(t / bucketSize) * bucketSize</code>.</li>
+<li>In <code>put()</code>, stamp <code>cachedAt</code> with the <em>quantized</em> value of <code>clock_()</code>, not the raw instant.</li>
+<li>The test that proves it matters: two separate <code>put()</code> calls for the <em>same key</em>, at two different (fake-clock) instants that fall inside the same bucket, should produce entries with an <strong>identical</strong> <code>cachedAt</code> — and therefore an identical TTL expiry boundary — even though the real instants differed. A third call just past the bucket boundary should get a different, later <code>cachedAt</code>.</li>
+</ol>
+
+<p class="ask-teacher">
+If the bucket-rounding math itself (the floor-division trick) isn't
+clicking, ask before you start — it's a five-minute concept once it
+clicks and a frustrating one to debug from first principles.
+</p>
+
+<nav class="lesson-nav">
+  <span><a href="../lessons/0003-at-least-as-fresh.html">&larr; Lesson 0003</a></span>
+  <span>Next: Lesson 0005 (not yet written)</span>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

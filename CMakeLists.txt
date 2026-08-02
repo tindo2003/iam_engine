@@ -28,5 +28,11 @@ target_link_libraries(iam_core PUBLIC nlohmann_json::nlohmann_json)
 add_executable(iam_demo src/main.cpp)
 target_link_libraries(iam_demo PRIVATE iam_core)
 
+# Standalone teaching demo -- deliberately not part of iam_core, see
+# demos/snapshot_consistency_race.cpp.
+find_package(Threads REQUIRED)
+add_executable(snapshot_race_demo demos/snapshot_consistency_race.cpp)
+target_link_libraries(snapshot_race_demo PRIVATE Threads::Threads)
+
 enable_testing()
 add_subdirectory(tests)
