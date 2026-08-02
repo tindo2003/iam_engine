@@ -1,6 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 #include "iam/cache.hpp"
 
@@ -136,4 +141,113 @@ TEST(DecisionCache, RetainsSnapshotsWithinTtl) {
 
     EXPECT_TRUE(cache.get(kAlice, recent).has_value());
     EXPECT_EQ(cache.size(), 2u);
+}
+
+// --- Concurrency --------------------------------------------------------
+
+TEST(DecisionCache, ConcurrentCallersForOneKeyComputeItOnlyOnce) {
+    // Thread safety alone would let all N threads miss, all compute, and
+    // all store the same answer -- correct, but N times the work. This is
+    // the property singleflight adds on top.
+    auto now = bucketAlignedNow();
+    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
+    const CacheKey key{"alice", "db:read", "urn:table:users"};
+
+    std::atomic<int> computeCalls{0};
+    std::mutex mu;
+    std::condition_variable cv;
+    bool release = false;
+
+    // Holds the flight open so later arrivals really do pile up behind it
+    // rather than finding a finished answer.
+    auto compute = [&] {
+        ++computeCalls;
+        std::unique_lock<std::mutex> lock(mu);
+        cv.wait(lock, [&] { return release; });
+        return Decision::Allow;
+    };
+
+    constexpr int kThreads = 16;
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&] { cache.getOrCompute(key, now, compute); });
+    }
+
+    // Wait for the others to queue up, but bounded -- releasing early only
+    // makes them cache hits instead, which the assertion tolerates.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (cache.coalesced() < kThreads - 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        release = true;
+    }
+    cv.notify_all();
+    for (std::thread& t : threads) {
+        t.join();
+    }
+
+    EXPECT_EQ(computeCalls.load(), 1);
+    EXPECT_EQ(cache.coalesced(), kThreads - 1);
+    EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST(DecisionCache, ADifferentKeyIsNotBlockedByAnInFlightOne) {
+    // Coalescing must dedupe one key, not serialise the whole cache.
+    auto now = bucketAlignedNow();
+    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
+
+    std::mutex mu;
+    std::condition_variable cv;
+    bool release = false;
+
+    std::thread blocker([&] {
+        cache.getOrCompute(CacheKey{"alice", "db:read", "a"}, now, [&] {
+            std::unique_lock<std::mutex> lock(mu);
+            cv.wait(lock, [&] { return release; });
+            return Decision::Allow;
+        });
+    });
+
+    // Must not need the blocked flight to finish first.
+    const Decision other =
+        cache.getOrCompute(CacheKey{"bob", "db:read", "b"}, now, [] { return Decision::Deny; });
+    EXPECT_EQ(other, Decision::Deny);
+
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        release = true;
+    }
+    cv.notify_all();
+    blocker.join();
+}
+
+TEST(DecisionCache, ConcurrentMixedTrafficStaysConsistent) {
+    auto now = bucketAlignedNow();
+    DecisionCache cache(kTtl, [&now] { return now; }, kBucket);
+
+    constexpr int kThreads = 8;
+    constexpr int kKeys = 64;
+    constexpr int kIterations = 500;
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t] {
+            for (int i = 0; i < kIterations; ++i) {
+                const CacheKey key{"user" + std::to_string((t * 7 + i) % kKeys), "db:read", "res"};
+                const Decision got =
+                    cache.getOrCompute(key, now, [] { return Decision::Allow; });
+                // Every key resolves to Allow here, so any other value
+                // would mean an entry was torn or mismatched.
+                EXPECT_EQ(got, Decision::Allow);
+            }
+        });
+    }
+    for (std::thread& t : threads) {
+        t.join();
+    }
+
+    EXPECT_EQ(cache.size(), static_cast<size_t>(kKeys));
 }

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <functional>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -55,6 +56,10 @@ struct Role {
 //
 // Still missing for a real PAP: nothing here persists, authorises, or
 // audits a write. This is the mechanism a PAP would drive, not the PAP.
+//
+// Thread-safe, with a shared_mutex rather than a plain one because the
+// access pattern is lopsided: every check reads, only administration
+// writes. Readers therefore never block each other.
 class RoleGraph {
 public:
     using Clock = std::function<Snapshot()>;
@@ -84,6 +89,11 @@ public:
     Snapshot revision() const;
 
 private:
+    // Transitive closure with no locking, for callers already holding one.
+    std::vector<RoleName> effectiveRolesUnlocked(const std::string& principal) const;
+    const Role* findUnlocked(const RoleName& name) const;
+
+    mutable std::shared_mutex mutex_;
     Clock clock_;
     Snapshot revision_{};
     std::unordered_map<RoleName, Role> roles_;

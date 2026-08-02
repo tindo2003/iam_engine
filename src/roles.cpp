@@ -35,20 +35,28 @@ Snapshot stampWrite(Snapshot previous, Snapshot now) {
 } // namespace
 
 void RoleGraph::addRole(Role role) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     roles_[role.name] = role;
     revision_ = stampWrite(revision_, clock_());
 }
 
 void RoleGraph::assign(const std::string& principal, const RoleName& role) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     assignments_[principal].push_back(role);
     revision_ = stampWrite(revision_, clock_());
 }
 
 Snapshot RoleGraph::revision() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return revision_;
 }
 
 const Role* RoleGraph::find(const RoleName& name) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return findUnlocked(name);
+}
+
+const Role* RoleGraph::findUnlocked(const RoleName& name) const {
     auto it = roles_.find(name);
     if (it != roles_.end()) {
         return &it->second;
@@ -57,6 +65,15 @@ const Role* RoleGraph::find(const RoleName& name) const {
 }
 
 std::vector<RoleName> RoleGraph::effectiveRoles(const std::string& principal) const {
+    // One shared lock for the whole traversal, not one per node lookup --
+    // otherwise a concurrent write could land mid-walk and the result
+    // would mix pre- and post-write state. Exactly the bug
+    // demos/snapshot_consistency_race.cpp reproduces.
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return effectiveRolesUnlocked(principal);
+}
+
+std::vector<RoleName> RoleGraph::effectiveRolesUnlocked(const std::string& principal) const {
     // Breadth-first transitive closure over `inherits`.
     //
     // `visited` is seeded with the direct assignments and updated at
@@ -80,7 +97,7 @@ std::vector<RoleName> RoleGraph::effectiveRoles(const std::string& principal) co
         for (const RoleName& role : curRoles) {
             ans.push_back(role);
 
-            const Role* found = find(role);
+            const Role* found = findUnlocked(role); // already holding the lock
             if (found == nullptr) {
                 continue; // an assignment may name a role nobody defined
             }

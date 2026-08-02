@@ -204,13 +204,12 @@ Decision PolicyEngine::evaluateForRoleCached(DecisionCache& subproblemCache,
     const Snapshot snapshot = selectSnapshot(consistency, minSnapshot, graph.revision(),
                                             subproblemCache.now(), subproblemCache.bucketSize());
 
-    if (std::optional<Decision> cached = subproblemCache.get(cache_key, snapshot)) {
-        return *cached;
-    }
-
-    const Decision decision = evaluateForRole(graph, role, request);
-    subproblemCache.put(cache_key, snapshot, decision);
-    return decision;
+    // getOrCompute rather than get/put: if several principals holding this
+    // role arrive at once, only the first evaluates it and the rest wait
+    // on that result instead of duplicating the work.
+    return subproblemCache.getOrCompute(cache_key, snapshot, [&] {
+        return evaluateForRole(graph, role, request);
+    });
 }
 
 bool PolicyEngine::evaluateRbacCached(DecisionCache& checkCache,

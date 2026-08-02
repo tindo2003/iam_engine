@@ -1,9 +1,14 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
@@ -59,6 +64,12 @@ Snapshot quantize(Snapshot t, std::chrono::milliseconds bucket);
 //   * `ttl` bounds RETENTION (capacity) only. An answer computed at
 //     snapshot S is correct for S forever -- ttl decides how long it is
 //     worth keeping around for callers still asking about S, nothing more.
+//
+// Thread-safe. Reads take a shared lock and writes an exclusive one,
+// which suits a cache that is read far more often than written. Note the
+// lock protects the CONTAINER, not the decision: two threads can still
+// race to compute the same missing entry, which is what getOrCompute()
+// below exists to prevent.
 class DecisionCache {
 public:
     using Clock = std::function<Snapshot()>;
@@ -83,6 +94,25 @@ public:
 
     void put(const CacheKey& key, Snapshot snapshot, Decision decision);
 
+    // Return the cached decision, or compute and store it -- running
+    // `compute` at most ONCE across all threads asking for the same key.
+    //
+    // Thread safety alone does not stop N concurrent requests for the same
+    // missing key from each running the full evaluation and then each
+    // storing the identical answer: they simply do it without corrupting
+    // the map. This deduplicates the *work*, not just the container --
+    // the pattern usually called singleflight.
+    //
+    // `compute` runs with no lock held, so a slow evaluation never blocks
+    // unrelated readers. Callers that arrive while it is running wait on
+    // its result rather than starting their own.
+    using Compute = std::function<Decision()>;
+    Decision getOrCompute(const CacheKey& key, Snapshot snapshot, const Compute& compute);
+
+    // How many calls waited on somebody else's in-flight computation
+    // instead of running their own.
+    size_t coalesced() const;
+
     Snapshot now() const;
     std::chrono::milliseconds bucketSize() const;
 
@@ -106,12 +136,33 @@ private:
     // are their own topic, out of scope here.
     void evict(std::map<Snapshot, Decision>& snapshots);
 
+    // Lookup with no locking, for callers that already hold one.
+    std::optional<Decision> getUnlocked(const CacheKey& key, Snapshot snapshot) const;
+
+    // A single in-flight computation is identified by the full logical
+    // key: same identity AND same snapshot.
+    struct FlightKey {
+        CacheKey key;
+        Snapshot snapshot;
+        bool operator==(const FlightKey& other) const;
+    };
+    struct FlightKeyHash {
+        size_t operator()(const FlightKey& flight) const;
+    };
+
     std::chrono::milliseconds ttl_;
     Clock clock_;
     std::chrono::milliseconds bucket_;
-    mutable size_t hits_{0};
-    mutable size_t misses_{0};
+
+    // Counters are atomic rather than mutex-guarded because get() holds
+    // only a shared lock, so several readers increment concurrently.
+    mutable std::atomic<size_t> hits_{0};
+    mutable std::atomic<size_t> misses_{0};
+    mutable std::atomic<size_t> coalesced_{0};
+
+    mutable std::shared_mutex mutex_;
     std::unordered_map<CacheKey, std::map<Snapshot, Decision>, CacheKeyHash> entries_;
+    std::unordered_map<FlightKey, std::shared_future<Decision>, FlightKeyHash> inFlight_;
 };
 
 } // namespace iam

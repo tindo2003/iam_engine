@@ -33,7 +33,23 @@ Snapshot quantize(Snapshot t, std::chrono::milliseconds bucket) {
 DecisionCache::DecisionCache(std::chrono::milliseconds ttl, Clock clock, std::chrono::milliseconds bucketSize)
     : ttl_(ttl), clock_(std::move(clock)), bucket_(bucketSize) {}
 
+bool DecisionCache::FlightKey::operator==(const FlightKey& other) const {
+    return snapshot == other.snapshot && key == other.key;
+}
+
+size_t DecisionCache::FlightKeyHash::operator()(const FlightKey& flight) const {
+    size_t h = CacheKeyHash{}(flight.key);
+    const auto ticks = static_cast<size_t>(flight.snapshot.time_since_epoch().count());
+    h ^= std::hash<size_t>{}(ticks) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    return h;
+}
+
 std::optional<Decision> DecisionCache::get(const CacheKey& key, Snapshot snapshot) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return getUnlocked(key, snapshot);
+}
+
+std::optional<Decision> DecisionCache::getUnlocked(const CacheKey& key, Snapshot snapshot) const {
     auto it = entries_.find(key);
     if (it == entries_.end()) {
         ++misses_;
@@ -52,6 +68,7 @@ std::optional<Decision> DecisionCache::get(const CacheKey& key, Snapshot snapsho
 }
 
 void DecisionCache::put(const CacheKey& key, Snapshot snapshot, Decision decision) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     auto& snapshots = entries_[key];
     snapshots[snapshot] = decision;
     evict(snapshots);
@@ -72,6 +89,68 @@ std::chrono::milliseconds DecisionCache::bucketSize() const {
     return bucket_;
 }
 
+Decision DecisionCache::getOrCompute(const CacheKey& key, Snapshot snapshot, const Compute& compute) {
+    if (std::optional<Decision> cached = get(key, snapshot)) {
+        return *cached;
+    }
+
+    const FlightKey flightKey{key, snapshot};
+    std::shared_future<Decision> waitOn;
+    std::shared_ptr<std::promise<Decision>> owned;
+
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+
+        // Re-check under the exclusive lock: between the fast path above
+        // and here, somebody may have finished and stored the answer.
+        if (std::optional<Decision> cached = getUnlocked(key, snapshot)) {
+            return *cached;
+        }
+
+        auto it = inFlight_.find(flightKey);
+        if (it != inFlight_.end()) {
+            waitOn = it->second; // somebody is already computing this
+        } else {
+            owned = std::make_shared<std::promise<Decision>>();
+            waitOn = owned->get_future().share();
+            inFlight_.emplace(flightKey, waitOn);
+        }
+    }
+
+    if (!owned) {
+        // Deliberately outside the lock -- waiting while holding it would
+        // block every reader on a computation we are not even doing.
+        ++coalesced_;
+        return waitOn.get();
+    }
+
+    // We own this flight. Compute with no lock held, so a slow evaluation
+    // does not stall unrelated readers.
+    try {
+        const Decision decision = compute();
+        put(key, snapshot, decision);
+        owned->set_value(decision);
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            inFlight_.erase(flightKey);
+        }
+        return decision;
+    } catch (...) {
+        // Retire the flight before rethrowing, or every waiter blocks
+        // forever on a promise nobody will ever fulfil.
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            inFlight_.erase(flightKey);
+        }
+        owned->set_exception(std::current_exception());
+        throw;
+    }
+}
+
+size_t DecisionCache::coalesced() const {
+    return coalesced_;
+}
+
 size_t DecisionCache::hits() const {
     return hits_;
 }
@@ -83,9 +162,11 @@ size_t DecisionCache::misses() const {
 void DecisionCache::resetCounters() {
     hits_ = 0;
     misses_ = 0;
+    coalesced_ = 0;
 }
 
 size_t DecisionCache::size() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     size_t total = 0;
     for (const auto& entry : entries_) {
         total += entry.second.size();

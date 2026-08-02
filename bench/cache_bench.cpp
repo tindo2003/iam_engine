@@ -37,9 +37,9 @@ Policy allow(const std::string& action, const std::string& resource) {
 // A role hierarchy `depth` levels deep, each level inheriting the one
 // below. Only the deepest role actually grants anything, so every check
 // has to traverse the whole chain.
-RoleGraph buildGraph(RoleGraph::Clock clock, int depth, int principals) {
-    RoleGraph graph(std::move(clock));
-
+// Populates in place: RoleGraph holds a mutex and so is non-copyable,
+// which is correct -- copying a lock means nothing.
+void buildGraph(RoleGraph& graph, int depth, int principals) {
     graph.addRole(Role{"level0", {allow("db:read", "urn:table:users")}, {}});
     for (int i = 1; i < depth; ++i) {
         graph.addRole(Role{"level" + std::to_string(i), {}, {"level" + std::to_string(i - 1)}});
@@ -49,7 +49,6 @@ RoleGraph buildGraph(RoleGraph::Clock clock, int depth, int principals) {
     for (int p = 0; p < principals; ++p) {
         graph.assign("user" + std::to_string(p), top);
     }
-    return graph;
 }
 
 void rule(const char* title) {
@@ -69,7 +68,8 @@ void benchBucketSize() {
     for (milliseconds bucket : {milliseconds{0}, milliseconds{10}, milliseconds{100},
                                 milliseconds{1000}, milliseconds{10'000}}) {
         auto now = std::chrono::steady_clock::now();
-        RoleGraph graph = buildGraph([&now] { return now; }, /*depth=*/3, /*principals=*/1);
+        RoleGraph graph([&now] { return now; });
+        buildGraph(graph, /*depth=*/3, /*principals=*/1);
 
         DecisionCache checkCache(kTtl, [&now] { return now; }, bucket);
         DecisionCache subproblemCache(kTtl, [&now] { return now; }, bucket);
@@ -108,7 +108,8 @@ void benchConsistencyLevels() {
 
     for (const Case& c : cases) {
         auto now = std::chrono::steady_clock::now();
-        RoleGraph graph = buildGraph([&now] { return now; }, 3, 1);
+        RoleGraph graph([&now] { return now; });
+        buildGraph(graph, 3, 1);
 
         DecisionCache checkCache(kTtl, [&now] { return now; }, milliseconds{1000});
         DecisionCache subproblemCache(kTtl, [&now] { return now; }, milliseconds{1000});
@@ -137,7 +138,8 @@ void benchSubproblemSharing() {
 
     for (int principals : {1, 2, 10, 100, 1000}) {
         auto now = std::chrono::steady_clock::now();
-        RoleGraph graph = buildGraph([&now] { return now; }, /*depth=*/3, principals);
+        RoleGraph graph([&now] { return now; });
+        buildGraph(graph, /*depth=*/3, principals);
 
         DecisionCache checkCache(kTtl, [&now] { return now; }, milliseconds{1000});
         DecisionCache subproblemCache(kTtl, [&now] { return now; }, milliseconds{1000});
@@ -178,7 +180,8 @@ void benchWhereTimeGoes(int depth) {
 
     constexpr int kIters = 200'000;
     auto frozen = std::chrono::steady_clock::now();
-    RoleGraph graph = buildGraph([&frozen] { return frozen; }, depth, /*principals=*/1);
+    RoleGraph graph([&frozen] { return frozen; });
+        buildGraph(graph, depth, /*principals=*/1);
     const Request req{"user0", "db:read", "urn:table:users"};
 
     const double traversal = nsPerOp(kIters, [&](int) {
@@ -221,7 +224,8 @@ void benchTraversalRedundancy() {
     for (int resources : {1, 10, 100}) {
         constexpr int kPrincipals = 50;
         auto now = std::chrono::steady_clock::now();
-        RoleGraph graph = buildGraph([&now] { return now; }, /*depth=*/3, kPrincipals);
+        RoleGraph graph([&now] { return now; });
+        buildGraph(graph, /*depth=*/3, kPrincipals);
 
         DecisionCache checkCache(kTtl, [&now] { return now; }, milliseconds{1000});
         DecisionCache subproblemCache(kTtl, [&now] { return now; }, milliseconds{1000});
