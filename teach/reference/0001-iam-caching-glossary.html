@@ -64,6 +64,28 @@ least that recent, while still allowing cache reuse). Strong consistency
 is opt-in per request, not automatic.</dd>
 </dl>
 
+<h3>TrueTime / commit wait</h3>
+<p>
+How Spanner (and therefore Zanzibar) makes a revision trustworthy across
+machines. <code>TT.now()</code> returns an <em>interval</em>
+<code>[earliest, latest]</code> rather than a point, kept narrow (ε under
+~4ms) by GPS plus atomic clocks. On commit, Spanner <strong>waits</strong>
+until the chosen timestamp is certainly in the past everywhere (~8ms)
+before making the write visible — after which no later transaction
+anywhere can claim an earlier timestamp, with zero coordination between
+writers.
+</p>
+<p>
+<strong>Why nothing cheaper works:</strong> the new enemy problem needs
+<em>real-time</em> ordering, not causal ordering. Logical clocks
+(Lamport, vector) only order events that communicated — a revoke in one
+datacenter and a read in another never did, so they report "concurrent",
+which is exactly the answer that lets a stale Allow through. Without
+atomic clocks you approximate: CockroachDB uses hybrid logical clocks
+plus a configured max-offset assumption, weaker and degrading if NTP
+drifts past the bound.
+</p>
+
 <h3>Allow/Deny caching asymmetry</h3>
 <p>
 Caching an <strong>Allow</strong> is the riskier of the two: a stale

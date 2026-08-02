@@ -123,6 +123,97 @@ it afterwards. But it is the hook a PAP would drive, and building one no
 longer requires touching the decision path at all.
 </p>
 
+<h2>How Zanzibar makes a revision trustworthy across machines</h2>
+<p>
+The local-clock limitation above is not a detail Google skipped — it is
+the hardest problem in the design, and they solved it with
+<strong>hardware</strong> plus a permanent latency tax. There is no
+algorithmic shortcut.
+</p>
+
+<h3>TrueTime: make the clock's error explicit</h3>
+<p>
+Spanner's <code>TT.now()</code> does not return a timestamp. It returns
+an <strong>interval</strong> <code>[earliest, latest]</code> — "the true
+time is definitely somewhere in here." That interval is kept narrow by
+GPS receivers <em>and</em> atomic clocks in every datacenter (two sources
+with uncorrelated failure modes, so one covers the other). The half-width
+ε is typically under ~4ms, worst case around 7ms.
+</p>
+<p>
+That is the whole conceptual move: rather than pretend clocks agree,
+<em>expose exactly how much they might disagree</em> and let the layers
+above reason about it.
+</p>
+
+<h3>Commit wait: literally wait for time to pass</h3>
+<p>
+When a write commits at timestamp <code>s</code>, Spanner does not make
+it visible immediately. It <strong>waits until <code>s</code> is
+guaranteed to be in the past on every machine</strong> — roughly 2ε, call
+it ~8ms — before releasing the transaction.
+</p>
+<p>
+It sounds absurd and it is exactly right. Once you have waited out the
+uncertainty, no later transaction anywhere can commit at an earlier
+timestamp, even on a machine whose clock runs maximally fast. That buys
+ordering across independent writers with <strong>zero coordination
+between them</strong> — no consensus round, no sequencer, no messages.
+Just a few milliseconds of patience.
+</p>
+
+<div class="callout">
+<div class="callout-title">Why only this solves the new enemy problem</div>
+<p>
+The new enemy problem is about <strong>real-time</strong> ordering: "the
+revoke happened before this request." It is <em>not</em> about causal
+ordering, and that distinction is the whole ballgame.
+</p>
+<p>
+Logical clocks (Lamport, vector clocks) order causally-related events and
+are cheap. But a revoke by an admin in one datacenter and a read by an
+attacker in another are <em>causally unrelated</em> — no messages passed
+between them, nothing to order by. A logical clock reports "concurrent,
+no defined order", which is precisely the answer that lets a stale Allow
+through.
+</p>
+<p>
+Real-time order requires real time. That is why the Zanzibar paper
+insists on <em>external</em> consistency rather than settling for causal
+consistency — and why it needed Spanner underneath rather than any
+ordinary distributed store.
+</p>
+</div>
+
+<h3>What it costs, and what you do without it</h3>
+<ul>
+<li><strong>~8ms added to every write</strong>, permanently. That is the
+price tag on the guarantee.</li>
+<li><strong>Custom hardware in every datacenter.</strong> Not something
+you can install from a package manager.</li>
+</ul>
+<p>
+Without atomic clocks you approximate. CockroachDB uses hybrid logical
+clocks plus a <em>configured</em> max-offset assumption, giving a weaker
+guarantee that degrades if NTP drifts past the assumed bound. That is the
+realistic option for anyone who is not Google — SpiceDB inherits whatever
+its datastore provides rather than solving this itself.
+</p>
+<p>
+So the honest position for <code>iam-engine</code>:
+<code>revision_ = clock_()</code> is the degenerate single-machine case
+where ε is zero because there is exactly one clock. It is not wrong — it
+is <em>correct for one writer</em>. The moment there are two, you are
+choosing between commit-wait-style bounded uncertainty, a coordination
+round, or a weaker guarantee. There is no free option, and that is the
+actual lesson.
+</p>
+
+<p class="citation">
+<a href="https://docs.cloud.google.com/spanner-omni/true-time-external-consistency" target="_blank" rel="noopener">TrueTime and external consistency</a> (Google Cloud) ·
+<a href="https://www.cockroachlabs.com/blog/living-without-atomic-clocks/" target="_blank" rel="noopener">Living without atomic clocks</a> (Cockroach Labs)
+</p>
+
 <h2>Check your understanding</h2>
 
 <div class="quiz" data-answer="a"
@@ -147,6 +238,19 @@ longer requires touching the decision path at all.
     <button class="quiz-option" data-key="b">Both select 1000, the original bucket start</button>
     <button class="quiz-option" data-key="c">They select 1600 and 1900, unshared keys</button>
     <button class="quiz-option" data-key="d">Both select 2000, the following bucket start</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="c"
+     data-feedback-correct="Right. The revoke and the read never exchanged messages, so nothing causal connects them -- yet the revoke genuinely happened first in real time, and that is the ordering that matters."
+     data-feedback-incorrect="Not quite -- reread the callout. Ask what a logical clock can say about two events on different machines that never communicated with each other.">
+  <p class="quiz-question">Why can't Lamport or vector clocks solve the new enemy problem across datacenters?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">They drift apart faster than atomic clocks do</button>
+    <button class="quiz-option" data-key="b">They require a coordination round for every write</button>
+    <button class="quiz-option" data-key="c">They cannot order events that never communicated</button>
+    <button class="quiz-option" data-key="d">They cannot represent timestamps at millisecond scale</button>
   </div>
   <p class="quiz-feedback" hidden></p>
 </div>
