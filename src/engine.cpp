@@ -1,5 +1,6 @@
 #include "iam/engine.hpp"
 
+#include <algorithm>
 #include <cassert>
 
 namespace iam {
@@ -65,23 +66,22 @@ Snapshot PolicyEngine::selectSnapshot(Consistency consistency,
                                     Snapshot revision,
                                     Snapshot now,
                                     std::chrono::milliseconds bucketSize) {
-    // TODO: apply `revision` as a floor to whatever the switch below
-    // returns -- std::max(chosen, revision), uniformly across all three
-    // levels. Restructure the switch to compute into a local rather than
-    // returning directly, so the floor cannot be skipped for one level.
+    // Each level picks a candidate; the revision floor is then applied to
+    // ALL of them at the end. Deliberately computed into a local rather
+    // than returned from each case -- returning directly is how one level
+    // quietly ends up skipping the floor.
     //
-    // Why uniformly, including MinimizeLatency: that is the whole point.
-    // If the floor only applied to AtLeastAsFresh, an ordinary request
-    // would keep hitting the pre-write entry until the bucket rolled
-    // over, which is exactly the staleness this is meant to eliminate.
     // Deliberately exhaustive, no `default:` -- if Consistency ever grows a
     // new value, this should fail to compile (-Wswitch) instead of silently
     // falling into the wrong branch.
+    Snapshot chosen = now;
+
     switch (consistency) {
         case Consistency::MinimizeLatency:
             // Everyone in this window computes the same bucket, so they all
             // share one cache entry by construction.
-            return quantize(now, bucketSize);
+            chosen = quantize(now, bucketSize);
+            break;
 
         case Consistency::AtLeastAsFresh: {
             // If the shared bucket already satisfies the caller's token,
@@ -90,17 +90,33 @@ Snapshot PolicyEngine::selectSnapshot(Consistency consistency,
             // traffic. Only a token newer than the bucket forces a private,
             // unshared snapshot.
             const Snapshot bucket = quantize(now, bucketSize);
-            return bucket >= minSnapshot ? bucket : minSnapshot;
+            chosen = bucket >= minSnapshot ? bucket : minSnapshot;
+            break;
         }
 
         case Consistency::FullyConsistent:
             // Exact instant, unquantized: essentially never collides with
             // an existing key, which is what disables reuse. No explicit
             // cache bypass needed anywhere.
-            return now;
+            chosen = now;
+            break;
     }
 
-    return now; // unreachable; keeps -Wreturn-type quiet
+    // The revision floor, applied uniformly. An answer must never claim to
+    // describe a world older than the last write, so a write immediately
+    // pushes every subsequent request onto a new key and leaves the
+    // pre-write entries unreachable.
+    //
+    // Uniformly is the whole point. Confine this to AtLeastAsFresh and
+    // ordinary MinimizeLatency traffic -- nearly all traffic -- keeps
+    // reading pre-write answers until the bucket rolls over, which is
+    // precisely the staleness this exists to eliminate.
+    //
+    // max() rather than replacing `chosen` outright: between a write at R
+    // and the next bucket boundary every request lands on R itself, so
+    // they still converge on one shared key instead of fragmenting into
+    // private ones.
+    return std::max(chosen, revision);
 }
 
 Decision PolicyEngine::evaluateForRole(const RoleGraph& graph,

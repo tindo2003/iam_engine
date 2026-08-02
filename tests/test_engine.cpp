@@ -219,11 +219,14 @@ TEST(EvaluateRbac, DeniedWhenEveryRoleIsUndecided) {
 
 TEST(RbacCached, PopulatesBothLayers) {
     auto now = bucketAlignedNow();
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
     graph.assign("alice", "engineer");
+    now = requestTime;
 
     EXPECT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
     EXPECT_EQ(checkCache.size(), 1u); // alice's whole-check answer
@@ -232,12 +235,15 @@ TEST(RbacCached, PopulatesBothLayers) {
 
 TEST(RbacCached, SecondPrincipalReusesTheRoleWork) {
     auto now = bucketAlignedNow();
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
     graph.assign("alice", "engineer");
     graph.assign("bob", "engineer");
+    now = requestTime;
 
     PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph,
                                      Request{"alice", "db:read", "urn:table:users"});
@@ -250,11 +256,14 @@ TEST(RbacCached, SecondPrincipalReusesTheRoleWork) {
 
 TEST(RbacCached, RepeatRequestHitsTheWholeCheckLayer) {
     auto now = bucketAlignedNow();
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
     graph.assign("alice", "engineer");
+    now = requestTime;
 
     // Poison layer 1 only. If it is consulted first, the role layer is
     // never reached and stays empty.
@@ -267,13 +276,16 @@ TEST(RbacCached, RepeatRequestHitsTheWholeCheckLayer) {
 TEST(RbacCached, StillHonoursDenyAcrossRoles) {
     // The combining rules must not change just because layers were added.
     auto now = bucketAlignedNow();
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
     graph.addRole(Role{"suspended", {deny("db:read", "urn:table:users")}, {}});
     graph.assign("alice", "engineer");
     graph.assign("alice", "suspended");
+    now = requestTime;
 
     EXPECT_FALSE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
 }
@@ -287,12 +299,15 @@ TEST(RbacCached, StillHonoursDenyAcrossRoles) {
 
 TEST(RbacCached, PersonNamedLikeARoleDoesNotInheritIt) {
     auto now = bucketAlignedNow();
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
 
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"employee", {allow("db:read", "urn:table:handbook")}, {}});
     graph.assign("alice", "employee");
+    now = requestTime;
     // NOTE: the person literally named "employee" holds no roles at all.
 
     const Request aliceReads{"alice", "db:read", "urn:table:handbook"};
@@ -314,12 +329,15 @@ TEST(RbacCached, RoleNamedLikeAPersonIsNotPoisonedByThem) {
     // Same collision, opposite order and opposite failure: the person's
     // cached denial must not be read back as the role's answer.
     auto now = bucketAlignedNow();
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
 
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"employee", {allow("db:read", "urn:table:handbook")}, {}});
     graph.assign("alice", "employee");
+    now = requestTime;
 
     const Request personNamedEmployee{"employee", "db:read", "urn:table:handbook"};
     const Request aliceReads{"alice", "db:read", "urn:table:handbook"};
@@ -338,12 +356,15 @@ TEST(RbacCached, RoleNamedLikeAPersonIsNotPoisonedByThem) {
 
 TEST(RbacCached, ReadsAPoisonedSubproblemEntryRatherThanReevaluating) {
     auto now = bucketAlignedNow();
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
 
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
     graph.assign("alice", "engineer");
+    now = requestTime;
 
     // Poison layer 2 only. The role genuinely allows this, so a `false`
     // proves the cached entry was used instead of a fresh evaluation.
@@ -357,12 +378,15 @@ TEST(RbacCached, CachesUndecidedRolesRatherThanSkippingThem) {
     // uncached. Treating "nothing matched" as a miss would re-evaluate a
     // known-empty role on every single request forever.
     auto now = bucketAlignedNow();
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
 
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:write", "urn:table:orders")}, {}});
     graph.assign("alice", "engineer");
+    now = requestTime;
 
     EXPECT_FALSE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
     ASSERT_EQ(subproblemCache.size(), 1u);
@@ -378,13 +402,17 @@ TEST(RbacCached, CachesUndecidedRolesRatherThanSkippingThem) {
 
 TEST(RbacCached, FullyConsistentCannotHitTheSharedBucket) {
     const Snapshot base = bucketAlignedNow();
-    auto now = base + milliseconds(750);
+    auto now = base; // graph is written at the bucket start
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
 
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
     graph.assign("alice", "engineer");
+    now = requestTime;
+    now = base + milliseconds(750); // then time moves on, same bucket
 
     // Poison the shared bucket. FullyConsistent selects an exact instant,
     // which is a different key, so it cannot reach this entry.
@@ -396,13 +424,17 @@ TEST(RbacCached, FullyConsistentCannotHitTheSharedBucket) {
 
 TEST(RbacCached, AtLeastAsFreshSharesTheMinimizeLatencyBucket) {
     const Snapshot base = bucketAlignedNow();
-    auto now = base + milliseconds(750);
+    auto now = base; // graph is written at the bucket start
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
 
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
     graph.assign("alice", "engineer");
+    now = requestTime;
+    now = base + milliseconds(750); // then time moves on, same bucket
 
     checkCache.put(CacheKey{"alice", "db:read", "urn:table:users"}, base, Decision::Deny);
 
@@ -413,13 +445,17 @@ TEST(RbacCached, AtLeastAsFreshSharesTheMinimizeLatencyBucket) {
 
 TEST(RbacCached, AtLeastAsFreshMissesWhenTokenIsFresherThanTheBucket) {
     const Snapshot base = bucketAlignedNow();
-    auto now = base + milliseconds(750);
+    auto now = base; // graph is written at the bucket start
+    const Snapshot requestTime = now;
+    now -= kBucket; // the graph is written before any of this happens
     DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
     DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
 
-    RoleGraph graph;
+    RoleGraph graph([&now] { return now; });
     graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
     graph.assign("alice", "engineer");
+    now = requestTime;
+    now = base + milliseconds(750); // then time moves on, same bucket
 
     checkCache.put(CacheKey{"alice", "db:read", "urn:table:users"}, base, Decision::Deny);
 
@@ -517,7 +553,11 @@ TEST(RbacCached, AWriteInvalidatesImmediatelyNotAtTheBucketBoundary) {
 
     ASSERT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
 
-    now += milliseconds(100); // still well inside the same bucket
+    // Deliberately no rewind/restore here, unlike the tests above: the
+    // clock must stay inside the SAME bucket across the revoke, so that
+    // quantize(now) never changes. Any re-evaluation below is therefore
+    // attributable to the revision floor and nothing else.
+    now += milliseconds(100);
 
     // Revoke, mid-bucket.
     graph.addRole(Role{"suspended", {deny("db:read", "urn:table:users")}, {}});

@@ -1,21 +1,47 @@
 #include "iam/roles.hpp"
 
+#include <algorithm>
 #include <set>
 
 namespace iam {
 
 RoleGraph::RoleGraph(Clock clock) : clock_(std::move(clock)) {}
 
+namespace {
+
+// Stamp a write, guaranteeing the revision STRICTLY advances.
+//
+// Two properties, and both matter for correctness rather than tidiness:
+//
+//   * Never backward. A revision that regressed would make previously
+//     unreachable pre-write entries reachable again -- silently undoing a
+//     revocation. steady_clock will not do this, but the clock here is
+//     injectable, so the invariant is enforced rather than assumed.
+//
+//   * Never merely equal. std::max(revision_, clock_()) alone is not
+//     enough: two writes inside one clock tick would leave the revision
+//     unchanged, so the second silently invalidates nothing. steady_clock
+//     is monotonic (non-decreasing), NOT strictly increasing, and coarse
+//     resolution makes that a real case rather than a theoretical one.
+//
+// Forcing a one-tick advance when the clock has not moved is the same
+// trick a hybrid logical clock uses. Cost: the revision can drift a few
+// ticks ahead of real time under a stalled clock, bounded by the number
+// of writes. Cheap next to a write that fails to invalidate.
+Snapshot stampWrite(Snapshot previous, Snapshot now) {
+    return std::max(now, previous + Snapshot::duration{1});
+}
+
+} // namespace
+
 void RoleGraph::addRole(Role role) {
     roles_[role.name] = role;
-    // TODO: stamp revision_ with clock_() -- this is a write.
+    revision_ = stampWrite(revision_, clock_());
 }
 
 void RoleGraph::assign(const std::string& principal, const RoleName& role) {
     assignments_[principal].push_back(role);
-    // TODO: same here. Both mutators are writes and both must advance the
-    // revision, or a cached answer can outlive the change that should
-    // have invalidated it.
+    revision_ = stampWrite(revision_, clock_());
 }
 
 Snapshot RoleGraph::revision() const {

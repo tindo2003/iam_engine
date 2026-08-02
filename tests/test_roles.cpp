@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 #include "iam/roles.hpp"
@@ -75,4 +76,43 @@ TEST(RoleGraph, CyclicInheritanceTerminates) {
     graph.assign("alice", "a");
 
     EXPECT_EQ(sorted(graph.effectiveRoles("alice")), (std::vector<RoleName>{"a", "b"}));
+}
+
+// --- Revision monotonicity ---------------------------------------------
+//
+// The revision floor is only sound if the revision never regresses and
+// never stalls. Both are enforced rather than assumed, because the clock
+// is injectable and therefore not guaranteed to behave.
+
+TEST(RoleGraph, RevisionStartsAtTheEpochBeforeAnyWrite) {
+    RoleGraph graph;
+    EXPECT_EQ(graph.revision(), Snapshot{});
+}
+
+TEST(RoleGraph, RevisionNeverMovesBackward) {
+    // A regressing revision would make pre-write cache entries reachable
+    // again -- silently resurrecting a revoked permission.
+    auto now = std::chrono::steady_clock::now();
+    RoleGraph graph([&now] { return now; });
+
+    graph.addRole(Role{"a", {}, {}});
+    const Snapshot afterFirstWrite = graph.revision();
+
+    now -= std::chrono::seconds(5); // clock jumps backwards
+    graph.addRole(Role{"b", {}, {}});
+
+    EXPECT_GT(graph.revision(), afterFirstWrite);
+}
+
+TEST(RoleGraph, RevisionAdvancesEvenWhenTheClockDoesNot) {
+    // Two writes inside one clock tick: without a forced advance the
+    // second would leave the revision unchanged and invalidate nothing.
+    auto frozen = std::chrono::steady_clock::now();
+    RoleGraph graph([&frozen] { return frozen; }); // never moves
+
+    graph.addRole(Role{"a", {}, {}});
+    const Snapshot afterFirstWrite = graph.revision();
+    graph.addRole(Role{"b", {}, {}});
+
+    EXPECT_GT(graph.revision(), afterFirstWrite);
 }
