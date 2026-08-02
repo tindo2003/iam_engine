@@ -1,10 +1,13 @@
 #pragma once
 
+#include <chrono>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "iam/policy.hpp"
+#include "iam/types.hpp"
 
 namespace iam {
 
@@ -41,20 +44,26 @@ struct Role {
 // takes `const RoleGraph&` and is a pure read. That split is already the
 // right shape for a PAP to own writes later without touching the PDP.
 //
-// The one real gap a PAP has to close: snapshots are currently invented
-// by the clock, not derived from actual policy writes, so nothing checks
-// that a `policies`/graph state genuinely corresponds to the snapshot a
-// caller claims. Closing it means giving RoleGraph a monotonic revision
-// bumped by every mutation, and having it report that revision:
+// revision() is the piece that closes the PAP gap: it reports the moment
+// this graph was last written to, so a cached answer can be tied to the
+// data version that produced it rather than merely to wall-clock time.
 //
-//     Snapshot revision() const;   // future, not built
+// What that buys, concretely: a write moves every subsequent read onto a
+// new cache key IMMEDIATELY, instead of leaving stale answers reachable
+// until the quantization bucket happens to roll over. That is lesson
+// 0001's new enemy problem solved rather than merely bounded.
 //
-// Then evaluateRbacCached's snapshot can be tied to a real write rather
-// than asserted by whoever calls it, and a ZedToken handed back from a write
-// becomes meaningful. That change is purely additive -- no existing
-// signature has to move -- which is why it is safe to defer.
+// Still missing for a real PAP: nothing here persists, authorises, or
+// audits a write. This is the mechanism a PAP would drive, not the PAP.
 class RoleGraph {
 public:
+    using Clock = std::function<Snapshot()>;
+
+    // Injectable clock, same pattern as DecisionCache: tests need to
+    // control when a "write" is stamped without sleeping.
+    explicit RoleGraph(Clock clock = std::chrono::steady_clock::now);
+
+    // Both mutators stamp the current time as the new revision.
     void addRole(Role role);
     void assign(const std::string& principal, const RoleName& role);
 
@@ -69,7 +78,14 @@ public:
     // diamond inheritance.
     std::vector<RoleName> effectiveRoles(const std::string& principal) const;
 
+    // When this graph was last mutated. A never-written graph sits at the
+    // clock's epoch, which is older than any real snapshot and therefore
+    // never disturbs the bucket a request would otherwise have chosen.
+    Snapshot revision() const;
+
 private:
+    Clock clock_;
+    Snapshot revision_{};
     std::unordered_map<RoleName, Role> roles_;
     std::unordered_map<std::string, std::vector<RoleName>> assignments_;
 };

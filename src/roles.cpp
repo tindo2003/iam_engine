@@ -4,12 +4,22 @@
 
 namespace iam {
 
+RoleGraph::RoleGraph(Clock clock) : clock_(std::move(clock)) {}
+
 void RoleGraph::addRole(Role role) {
     roles_[role.name] = role;
+    // TODO: stamp revision_ with clock_() -- this is a write.
 }
 
 void RoleGraph::assign(const std::string& principal, const RoleName& role) {
     assignments_[principal].push_back(role);
+    // TODO: same here. Both mutators are writes and both must advance the
+    // revision, or a cached answer can outlive the change that should
+    // have invalidated it.
+}
+
+Snapshot RoleGraph::revision() const {
+    return revision_;
 }
 
 const Role* RoleGraph::find(const RoleName& name) const {

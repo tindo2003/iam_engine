@@ -17,6 +17,10 @@ constexpr milliseconds kBucket{1000};
 
 // Snap a real clock reading to a bucket boundary so no test depends on
 // where wall-clock time happens to land when it runs.
+// A graph nobody has written to yet: older than any real snapshot, so it
+// never disturbs the bucket a request would otherwise select.
+const Snapshot kNeverWritten{};
+
 Snapshot bucketAlignedNow() {
     return quantize(std::chrono::steady_clock::now(), kBucket);
 }
@@ -113,7 +117,7 @@ TEST_F(PolicyEngineTest, SelectSnapshotMinimizeLatencyQuantizesToTheBucket) {
     const Snapshot base = bucketAlignedNow();
     const Snapshot now = base + milliseconds(750);
 
-    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::MinimizeLatency, Snapshot{}, now, kBucket), base);
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::MinimizeLatency, Snapshot{}, kNeverWritten, now, kBucket), base);
 }
 
 TEST_F(PolicyEngineTest, SelectSnapshotFullyConsistentUsesTheExactInstant) {
@@ -122,7 +126,7 @@ TEST_F(PolicyEngineTest, SelectSnapshotFullyConsistentUsesTheExactInstant) {
 
     // Unquantized on purpose: that is what stops it from ever colliding
     // with the shared bucket entry.
-    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::FullyConsistent, Snapshot{}, now, kBucket), now);
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::FullyConsistent, Snapshot{}, kNeverWritten, now, kBucket), now);
 }
 
 TEST_F(PolicyEngineTest, SelectSnapshotAtLeastAsFreshSharesTheBucketWhenTokenIsOlder) {
@@ -132,7 +136,7 @@ TEST_F(PolicyEngineTest, SelectSnapshotAtLeastAsFreshSharesTheBucketWhenTokenIsO
 
     // The current bucket already satisfies this token, so the request
     // lands on the same entry MinimizeLatency traffic uses.
-    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::AtLeastAsFresh, staleToken, now, kBucket), base);
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::AtLeastAsFresh, staleToken, kNeverWritten, now, kBucket), base);
 }
 
 TEST_F(PolicyEngineTest, SelectSnapshotAtLeastAsFreshUsesTheTokenWhenItIsFresher) {
@@ -142,7 +146,7 @@ TEST_F(PolicyEngineTest, SelectSnapshotAtLeastAsFreshUsesTheTokenWhenItIsFresher
 
     // Token demands newer than the bucket start -> private snapshot, no
     // sharing. That cost is the price of the stronger guarantee.
-    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::AtLeastAsFresh, freshToken, now, kBucket), freshToken);
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::AtLeastAsFresh, freshToken, kNeverWritten, now, kBucket), freshToken);
 }
 
 // --- evaluateRbac (public) ---------------------------------------------
@@ -424,4 +428,102 @@ TEST(RbacCached, AtLeastAsFreshMissesWhenTokenIsFresherThanTheBucket) {
     EXPECT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead,
                                                     Consistency::AtLeastAsFresh,
                                                     base + milliseconds(500)));
+}
+
+// --- The revision floor -------------------------------------------------
+
+TEST(SelectSnapshot, AnUnwrittenGraphDoesNotDisturbTheBucket) {
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot now = base + milliseconds(750);
+
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::MinimizeLatency, Snapshot{},
+                                            kNeverWritten, now, kBucket),
+              base);
+}
+
+TEST(SelectSnapshot, ARecentWriteOverridesTheBucket) {
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot now = base + milliseconds(750);
+    const Snapshot writtenAt = base + milliseconds(500); // mid-bucket write
+
+    // The bucket alone would have chosen `base`, which predates the write.
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::MinimizeLatency, Snapshot{},
+                                            writtenAt, now, kBucket),
+              writtenAt);
+}
+
+TEST(SelectSnapshot, AnOldWriteLeavesTheBucketAlone) {
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot now = base + milliseconds(750);
+    const Snapshot writtenAt = base - kBucket; // last written a bucket ago
+
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::MinimizeLatency, Snapshot{},
+                                            writtenAt, now, kBucket),
+              base);
+}
+
+TEST(SelectSnapshot, TheRevisionFloorAppliesToEveryConsistencyLevel) {
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot now = base + milliseconds(750);
+    const Snapshot writtenAt = base + milliseconds(500);
+
+    // MinimizeLatency would take the bucket, AtLeastAsFresh an old token --
+    // both predate the write, so both must be pulled forward to it.
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::MinimizeLatency, Snapshot{},
+                                            writtenAt, now, kBucket),
+              writtenAt);
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::AtLeastAsFresh, base - kBucket,
+                                            writtenAt, now, kBucket),
+              writtenAt);
+
+    // FullyConsistent already picks an instant after the write, so the
+    // floor changes nothing for it.
+    EXPECT_EQ(PolicyEngine::selectSnapshot(Consistency::FullyConsistent, Snapshot{},
+                                            writtenAt, now, kBucket),
+              now);
+}
+
+TEST(SelectSnapshot, RequestsBetweenAWriteAndTheNextBucketStillShareOneKey) {
+    // The floor must not fragment the cache: everyone in the window
+    // between the write and the next boundary lands on the SAME snapshot.
+    const Snapshot base = bucketAlignedNow();
+    const Snapshot writtenAt = base + milliseconds(500);
+
+    const Snapshot early = PolicyEngine::selectSnapshot(
+        Consistency::MinimizeLatency, Snapshot{}, writtenAt, base + milliseconds(600), kBucket);
+    const Snapshot late = PolicyEngine::selectSnapshot(
+        Consistency::MinimizeLatency, Snapshot{}, writtenAt, base + milliseconds(900), kBucket);
+
+    EXPECT_EQ(early, late);
+    EXPECT_EQ(early, writtenAt);
+
+    // Once the bucket catches up, everyone moves back onto it together.
+    const Snapshot afterBoundary = PolicyEngine::selectSnapshot(
+        Consistency::MinimizeLatency, Snapshot{}, writtenAt, base + kBucket + milliseconds(100), kBucket);
+    EXPECT_EQ(afterBoundary, base + kBucket);
+}
+
+TEST(RbacCached, AWriteInvalidatesImmediatelyNotAtTheBucketBoundary) {
+    // The payoff, and lesson 0001's new enemy problem finally solved
+    // rather than merely bounded: a revocation must take effect on the
+    // very next request, not whenever the quantization window rolls over.
+    auto now = bucketAlignedNow();
+    DecisionCache checkCache(kTtl, [&now] { return now; }, kBucket);
+    DecisionCache subproblemCache(kTtl, [&now] { return now; }, kBucket);
+
+    RoleGraph graph([&now] { return now; });
+    graph.addRole(Role{"engineer", {allow("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "engineer");
+
+    ASSERT_TRUE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
+
+    now += milliseconds(100); // still well inside the same bucket
+
+    // Revoke, mid-bucket.
+    graph.addRole(Role{"suspended", {deny("db:read", "urn:table:users")}, {}});
+    graph.assign("alice", "suspended");
+
+    // Without the revision floor this returns the cached `true` for the
+    // rest of the bucket -- alice keeps an access she has just lost.
+    EXPECT_FALSE(PolicyEngine::evaluateRbacCached(checkCache, subproblemCache, graph, kRead));
 }

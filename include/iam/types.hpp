@@ -1,8 +1,17 @@
 #pragma once
 
+#include <chrono>
 #include <string>
 
 namespace iam {
+
+// A point in the policy timeline. In a real system this is a database
+// revision -- Spanner's TrueTime microseconds, surfaced to clients as an
+// opaque ZedToken. Here it is just a steady_clock time_point.
+//
+// Lives here rather than in cache.hpp because RoleGraph reports one too
+// (see RoleGraph::revision), and roles.hpp must not depend on the cache.
+using Snapshot = std::chrono::steady_clock::time_point;
 
 // A single access request: who, doing what, to which resource.
 struct Request {

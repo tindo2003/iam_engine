@@ -44,6 +44,17 @@ carries the version it was computed against. SpiceDB's twist: it
 windows) so many real requests collide onto the same cache key — the
 quantization is what makes the cache useful, not just correct.</dd>
 
+<dt><strong>Revision floor</strong> (lesson 0007)</dt>
+<dd>Derive the snapshot from when the policy data was last WRITTEN, not
+from the clock: <code>max(&lt;consistency choice&gt;, graph.revision())</code>.
+A write instantly pushes every later request onto a new key, so
+pre-write entries become <em>unreachable</em> rather than merely
+expiring. This is the new enemy problem solved rather than bounded, and
+it must apply to every consistency level -- confining it to
+<code>at_least_as_fresh</code> would leave ordinary traffic reading
+stale answers. Sharing survives: between the write and the next bucket
+boundary, every request converges on the revision itself.</dd>
+
 <dt><strong>Event-driven / opt-in strong consistency</strong></dt>
 <dd>Rather than push every write into every cache, SpiceDB pushes the
 choice to the <em>caller</em>: a request can ask for

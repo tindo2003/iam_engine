@@ -62,8 +62,18 @@ bool PolicyEngine::evaluate(const std::vector<Policy>& policies, const Request& 
 
 Snapshot PolicyEngine::selectSnapshot(Consistency consistency,
                                     Snapshot minSnapshot,
+                                    Snapshot revision,
                                     Snapshot now,
                                     std::chrono::milliseconds bucketSize) {
+    // TODO: apply `revision` as a floor to whatever the switch below
+    // returns -- std::max(chosen, revision), uniformly across all three
+    // levels. Restructure the switch to compute into a local rather than
+    // returning directly, so the floor cannot be skipped for one level.
+    //
+    // Why uniformly, including MinimizeLatency: that is the whole point.
+    // If the floor only applied to AtLeastAsFresh, an ordinary request
+    // would keep hitting the pre-write entry until the bucket rolled
+    // over, which is exactly the staleness this is meant to eliminate.
     // Deliberately exhaustive, no `default:` -- if Consistency ever grows a
     // new value, this should fail to compile (-Wswitch) instead of silently
     // falling into the wrong branch.
@@ -175,7 +185,8 @@ Decision PolicyEngine::evaluateForRoleCached(DecisionCache& subproblemCache,
     //      matched nothing"), not a miss. Collapsing it re-evaluates a
     //      known-empty role forever.
     const CacheKey cache_key{.subject = role, .action = request.action, .resource = request.resource};
-    const Snapshot snapshot = selectSnapshot(consistency, minSnapshot, subproblemCache.now(), subproblemCache.bucketSize());
+    const Snapshot snapshot = selectSnapshot(consistency, minSnapshot, graph.revision(),
+                                            subproblemCache.now(), subproblemCache.bucketSize());
 
     if (std::optional<Decision> cached = subproblemCache.get(cache_key, snapshot)) {
         return *cached;
@@ -233,7 +244,7 @@ bool PolicyEngine::evaluateRbacCached(DecisionCache& checkCache,
     const CacheKey check_key{.subject = request.principal,
                             .action = request.action,
                             .resource = request.resource};
-    const Snapshot snapshot = selectSnapshot(consistency, minSnapshot,
+    const Snapshot snapshot = selectSnapshot(consistency, minSnapshot, graph.revision(),
                                             checkCache.now(), checkCache.bucketSize());
 
     if (std::optional<Decision> cached = checkCache.get(check_key, snapshot)) {

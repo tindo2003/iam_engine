@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lesson 7 — The Revision Floor</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 0007 · iam-engine teaching workspace</p>
+<h1>The Revision Floor</h1>
+<p class="sidenote">Six lessons ago you learned to <em>bound</em> the new enemy problem. This one closes it. It is also where the PAP — the missing administration point — finally has something concrete to attach to.</p>
+
+<h2>What lesson 0001 actually settled for</h2>
+<p>
+Go back and reread the promise made in
+<a href="../lessons/0001-the-new-enemy-problem.html">lesson 0001</a>: a
+cached Allow must not survive a real revoke. Everything since has bounded
+that window — TTL first, then the quantization bucket — but never
+eliminated it. Revoke alice's access mid-bucket today and she keeps it
+until the boundary rolls over.
+</p>
+<p>
+That is not a bug in the implementation. It is the honest consequence of
+where the snapshot comes from:
+</p>
+<pre><code>snapshot = quantize(now, bucket)   // derived from the CLOCK</code></pre>
+<p>
+The snapshot is supposed to mean <em>"which version of the policy data
+this answer was computed against."</em> Deriving it from wall-clock time
+makes that a guess. It is a good guess when data changes rarely — but it
+has no way to know a write just happened.
+</p>
+
+<h2>The fix: let the data speak</h2>
+<p>
+Give <code>RoleGraph</code> a <code>revision()</code> — the moment it was
+last written to — and use it as a floor on whatever the consistency level
+would otherwise have chosen:
+</p>
+<pre><code>snapshot = max(&lt;per-consistency choice&gt;, graph.revision())</code></pre>
+<p>
+Now a write at time <code>R</code> instantly pushes every subsequent
+request onto a key at or after <code>R</code>. The pre-write entries are
+not expired, not evicted, not invalidated — they are simply
+<strong>unreachable</strong>, because nobody will ever compute their key
+again. That is a stronger guarantee than expiry, and it costs nothing to
+enforce.
+</p>
+
+<div class="callout">
+<div class="callout-title">The trap: it must apply to every level</div>
+<p>
+It is tempting to treat the revision as just another token and fold it
+into <code>AtLeastAsFresh</code>, which already takes a floor. That would
+be wrong in the most dangerous way possible: ordinary
+<code>MinimizeLatency</code> traffic — which is nearly all traffic —
+would keep reading pre-write entries for the rest of the bucket. The
+requests most likely to be exploiting a just-revoked permission are
+exactly the ones that would not be protected.
+</p>
+</div>
+
+<h2>Why this does not wreck sharing</h2>
+<p>
+The obvious worry: if a write drags everyone onto an unquantized
+timestamp, does each request get its own private key? No — because they
+all get the <em>same</em> one. Write at <code>t=1500</code>, bucket
+<code>1000</code>:
+</p>
+<pre><code>request at   quantize(now)   revision   snapshot   shared?
+   1600          1000          1500       1500     yes -- with all others
+   1900          1000          1500       1500     same entry
+   2100          2000          1500       2000     back on the bucket</code></pre>
+<p>
+Between the write and the next boundary, everyone converges on
+<code>R</code> itself. After it, everyone moves back onto the bucket
+together. The cache is never fragmented; it just briefly rallies around a
+different shared value.
+</p>
+
+<h2>Where the PAP fits</h2>
+<p>
+This is the gap flagged back in
+<a href="../../include/iam/roles.hpp"><code>roles.hpp</code></a>: nothing
+tied a cached answer to the data version that produced it. Real Zanzibar
+gets this for free — Spanner assigns every write a TrueTime timestamp, so
+a revision is a fact about the database, not an assertion by a caller.
+</p>
+<p>
+<code>revision()</code> is that mechanism in miniature. It is still not a
+PAP: nothing here persists a write, authorises who may make it, or audits
+it afterwards. But it is the hook a PAP would drive, and building one no
+longer requires touching the decision path at all.
+</p>
+
+<h2>Check your understanding</h2>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Right -- and those are nearly all requests. Protecting only token-bearing callers would leave the common path serving exactly the answers a revoke was meant to kill."
+     data-feedback-incorrect="Not quite -- reread the callout. Ask which consistency level ordinary traffic uses, and what it would read from the cache if the floor did not apply to it.">
+  <p class="quiz-question">Why must the revision floor apply to <code>MinimizeLatency</code>, not only to <code>AtLeastAsFresh</code>?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">Otherwise ordinary requests keep serving pre-write answers</button>
+    <button class="quiz-option" data-key="b">Otherwise the quantization bucket stops advancing entirely</button>
+    <button class="quiz-option" data-key="c">Otherwise consistency tokens lose their ordering guarantee</button>
+    <button class="quiz-option" data-key="d">Otherwise eviction reclaims entries before their deadline</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<div class="quiz" data-answer="a"
+     data-feedback-correct="Correct. Both land on the revision itself, so the cache rallies around one shared value rather than fragmenting into private keys."
+     data-feedback-incorrect="Not quite -- work through max(quantize(now), revision) for each. quantize(1600) and quantize(1900) are both 1000, which is older than the write.">
+  <p class="quiz-question">A write lands at t=1500 with a 1000ms bucket. Requests arrive at 1600 and 1900. What snapshot does each select?</p>
+  <div class="quiz-options">
+    <button class="quiz-option" data-key="a">Both select 1500, sharing a single entry</button>
+    <button class="quiz-option" data-key="b">Both select 1000, the original bucket start</button>
+    <button class="quiz-option" data-key="c">They select 1600 and 1900, unshared keys</button>
+    <button class="quiz-option" data-key="d">Both select 2000, the following bucket start</button>
+  </div>
+  <p class="quiz-feedback" hidden></p>
+</div>
+
+<h2>Build it into iam-engine</h2>
+<p>The scaffold is committed; three TODOs, and 4 tests currently red:</p>
+<ol>
+<li><strong><code>RoleGraph::addRole</code></strong> — stamp
+<code>revision_</code> with <code>clock_()</code>.</li>
+<li><strong><code>RoleGraph::assign</code></strong> — the same. Both are
+writes; miss either one and a cached answer outlives the change that
+should have killed it.</li>
+<li><strong><code>PolicyEngine::selectSnapshot</code></strong> — apply
+<code>std::max(chosen, revision)</code> uniformly. The switch currently
+returns straight out of each case, so restructure it to compute into a
+local first — otherwise it is far too easy to apply the floor to two
+levels and quietly forget the third.</li>
+</ol>
+<pre><code>ctest --test-dir build -R "SelectSnapshot|AWriteInvalidates" --output-on-failure</code></pre>
+<p>
+The one to watch is
+<code>RbacCached.AWriteInvalidatesImmediatelyNotAtTheBucketBoundary</code>.
+Alice is allowed and cached; mid-bucket she is assigned a
+<code>suspended</code> role that denies. Without the floor she keeps the
+access she has just lost. That test is lesson 0001's scenario, run
+against real code, six lessons later.
+</p>
+
+<p class="ask-teacher">
+Worth being sure about before you start: why the floor is
+<code>max()</code> rather than replacing the chosen snapshot outright. If
+that is not obvious, ask — it is the difference between preserving
+sharing and destroying it.
+</p>
+
+<nav class="lesson-nav">
+  <span><a href="../lessons/0006-subproblem-caching.html">&larr; Lesson 0006</a></span>
+  <span>Reference: <a href="../reference/0001-iam-caching-glossary.html">IAM caching glossary</a></span>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

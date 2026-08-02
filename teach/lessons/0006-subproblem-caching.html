@@ -12,8 +12,9 @@
 <p class="sidenote">The payoff. Lessons 0001–0004 built a cache for whole checks; lesson 0005 built the roles that finally create something smaller to cache. This one puts them together — and the result is a genuinely different kind of caching than what you have today.</p>
 
 <h2>What your cache can and cannot share today</h2>
+<p class="sidenote"><strong>Since written:</strong> the whole-check cache was reached through <code>evaluateCached</code> at the time. That function has since been deleted — its key could not capture its own <code>policies</code> argument — and its role is now played by <code>evaluateRbacCached</code>'s layer 1, which keys identically. The argument below is unchanged.</p>
 <p>
-<code>evaluateCached</code> keys on <code>(principal, action, resource,
+The whole-check cache keys on <code>(principal, action, resource,
 snapshot)</code>. Ask yourself what that means for two colleagues:
 </p>
 <pre><code>alice: db:read on urn:table:users   -> key (alice, db:read, users, S)
@@ -111,7 +112,7 @@ meaning. Decide deliberately: rename the field to something neutral
 the collision question is the one that actually matters.</li>
 <li><strong>Add a cached wrapper</strong> alongside
 <code>evaluateForRole</code>, taking a <code>DecisionCache&amp;</code>
-plus consistency and token, exactly mirroring <code>evaluateCached</code>'s
+plus consistency and token, mirroring the whole-check cached path's
 signature. Reuse <code>selectSnapshot()</code> verbatim.</li>
 <li><strong>Watch out:</strong> <code>DecisionCache</code> stores
 <code>bool</code>, but a subproblem answer is a three-valued
@@ -134,7 +135,7 @@ obvious; getting it wrong reintroduces a bug you have already fixed once.
 
 <nav class="lesson-nav">
   <span><a href="../lessons/0005-roles-and-subproblems.html">&larr; Lesson 0005</a></span>
-  <span>Next: Lesson 0007 (not yet written)</span>
+  <span>Next: <a href="../lessons/0007-the-revision-floor.html">Lesson 0007 — The Revision Floor</a></span>
 </nav>
 
 <script src="../assets/quiz.js"></script>

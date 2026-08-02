@@ -108,8 +108,19 @@ public:
     // exact, unquantized instant produces a key that essentially never
     // collides, so it misses and recomputes as a consequence of the key
     // rather than as a special case in the control flow.
+    //
+    // `revision` is a floor applied to EVERY level, not just
+    // AtLeastAsFresh: it is when the policy data was last written, so an
+    // answer older than it is answering about a world that no longer
+    // exists. Applying it uniformly is what makes a write invalidate the
+    // cache immediately rather than at the next bucket boundary.
+    //
+    // Note this preserves sharing. Between a write at R and the next
+    // bucket boundary, every request selects exactly R -- one shared key,
+    // not a private one each.
     static Snapshot selectSnapshot(Consistency consistency,
                                     Snapshot minSnapshot,
+                                    Snapshot revision,
                                     Snapshot now,
                                     std::chrono::milliseconds bucketSize);
 

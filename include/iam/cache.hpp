@@ -33,16 +33,8 @@ struct CacheKeyHash {
     size_t operator()(const CacheKey& key) const;
 };
 
-// A point in the policy timeline. In a real system this is a database
-// revision -- Spanner's TrueTime microseconds, surfaced to clients as an
-// opaque ZedToken. Here it is just a steady_clock time_point.
+// (Snapshot itself now lives in types.hpp -- RoleGraph reports one too.)
 //
-// This single concept replaces the old separate PolicyVersion: a real
-// ZedToken *is* a timestamp, so carrying both would have been two names
-// for one idea. See
-// teach/learning-records/0002-why-time-belongs-in-a-real-cache-key.md.
-using Snapshot = std::chrono::steady_clock::time_point;
-
 // Rounds `t` down to the start of its `bucket` window; returns `t`
 // unchanged when `bucket` is zero.
 //
