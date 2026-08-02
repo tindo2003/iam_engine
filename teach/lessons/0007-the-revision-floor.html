@@ -90,6 +90,77 @@ writer. The local version works for one in-process graph and falls apart
 the moment there are two writers on two machines.
 </p>
 
+<h2>revision vs. snapshot: two things of the same type</h2>
+<p>
+Both are a <code>Snapshot</code>, which is exactly what makes them easy to
+conflate. They answer different questions and belong to different things.
+</p>
+<pre><code>                 revision                    snapshot
+belongs to       the DATA (RoleGraph)        a REQUEST
+means            "last written at"           "evaluating as of"
+changes when     someone writes              clock advances, OR revision jumps
+how many alive   exactly one, always moving  many at once, each frozen forever
+owned by         RoleGraph                   computed per call, becomes cache key</code></pre>
+
+<h3>The relationship is one-way</h3>
+<p>
+The revision is an <em>input</em> to computing a snapshot, never the
+reverse:
+</p>
+<pre><code>RoleGraph.revision() --+
+Consistency -----------+
+minSnapshot (token) ---+--&gt; selectSnapshot() --&gt; snapshot --&gt; cache key
+now -------------------+
+bucketSize ------------+</code></pre>
+<p>
+Nothing flows back. The cache never touches the graph; the graph does not
+know a cache exists. <code>selectSnapshot()</code> is the <em>only</em>
+place they meet, and it is a pure function over plain values — which is
+precisely why neither component has to know about the other.
+</p>
+<p>
+The invariant it enforces: <strong><code>snapshot &gt;= revision</code>,
+always</strong>. An answer can never claim to describe a world older than
+the last write.
+</p>
+
+<h3>Watch both evolve</h3>
+<p>With a 1000ms bucket:</p>
+<pre><code>  t     event            revision   quantize(now)   snapshot   why
+  ----  ---------------  ---------  --------------  ---------  ---------------------------
+     0  graph created    epoch      0                       0  never written
+   100  addRole            *100*    0                       -  write bumps revision
+   150  alice checks       100      0                   *100*  floor wins; bucket pre-dates it
+   900  bob checks         100      0                   *100*  same key -&gt; shared with alice
+  1100  alice checks       100      1000               *1000*  bucket overtook the revision
+  1500  assign            *1500*    1000                    -  write bumps revision again
+  1600  alice checks       1500     1000               *1500*  floor wins again
+  2100  alice checks       1500     2000               *2000*  bucket overtakes again</code></pre>
+<p>
+The snapshot is <code>max()</code> of two rising quantities: one climbing
+in <strong>steps</strong> (the bucket) and one <strong>jumping on
+writes</strong> (the revision). Whichever is ahead wins. That sawtooth is
+the whole mechanism.
+</p>
+
+<div class="callout">
+<div class="callout-title">A write deletes nothing</div>
+<p>
+At t=1600 the cache still physically holds entries at snapshots 0, 100
+and 1000. They are not corrupt and not expired — they are perfectly valid
+answers <em>about the world as it was at those moments</em>. They are
+merely <strong>unreachable</strong>, because no future request will ever
+compute a snapshot below 1500 again.
+</p>
+<p>
+That is the difference from invalidation. TTL-style invalidation says
+"this answer has gone bad." The revision floor says "that answer is still
+true about a world nobody is asking about anymore." Eviction
+(<code>ttl</code>) reclaims them eventually, but that is capacity
+housekeeping — entirely separate from correctness.
+</p>
+</div>
+
 <h2>Why this does not wreck sharing</h2>
 <p>
 The obvious worry: if a write drags everyone onto an unquantized
